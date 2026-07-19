@@ -23,7 +23,15 @@ ORDER_ID ?= ord_1001
 	produce-cancelled \
 	consume \
 	consume-once \
-	psql
+	psql \
+	build-dds \
+	build-mart \
+	build-analytics \
+	rebuild-from-kafka \
+	test \
+	test-unit \
+	test-integration \
+	test-all
 
 up:
 	docker compose up -d
@@ -107,3 +115,30 @@ build-mart:
 build-analytics:
 	$(MAKE) build-dds
 	$(MAKE) build-mart
+
+rebuild-from-kafka:
+	docker exec -i contract_dwh_postgres \
+		psql -U dwh -d dwh \
+		-c "TRUNCATE mart_daily_orders, dds_orders, raw_order_created, raw_order_paid, raw_order_cancelled, dead_letter_events;"
+
+	CONSUMER_GROUP_ID=contract-dwh-replay-$$(date +%s) \
+		$(PYTHON) src/consumer.py --idle-timeout 5
+
+	$(MAKE) build-analytics
+
+test:
+	$(PYTHON) -m pytest -v
+
+test-unit:
+	$(PYTHON) -m pytest tests/ -v
+
+test-integration:
+	$(MAKE) rebuild-from-kafka
+	docker exec -i contract_dwh_postgres \
+		psql -U dwh -d dwh \
+		-v ON_ERROR_STOP=1 \
+		< sql/tests/check_pipeline.sql
+
+test-all:
+	$(MAKE) test
+	$(MAKE) test-integration

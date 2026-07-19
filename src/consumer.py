@@ -108,6 +108,16 @@ def main() -> None:
         help="Timeout in seconds for --once mode",
     )
 
+    parser.add_argument(
+        "--idle-timeout",
+        type=float,
+        default=None,
+        help=(
+            "Stop consumer after this many seconds "
+            "without receiving new messages"
+        ),
+    )
+
     args = parser.parse_args()
 
     load_dotenv()
@@ -150,6 +160,7 @@ def main() -> None:
     consumer.subscribe(topics)
 
     started_at = time.monotonic()
+    last_message_at = started_at
 
     print(
         "Consumer started. Topics: "
@@ -162,21 +173,40 @@ def main() -> None:
             message = consumer.poll(timeout=1.0)
 
             if message is None:
+                now = time.monotonic()
+
                 if (
                     args.once
-                    and time.monotonic() - started_at >= args.timeout
+                    and now - started_at >= args.timeout
                 ):
-                    print("No new messages received")
+                    print(
+                        f"No new messages received "
+                        f"within {args.timeout} seconds"
+                    )
+                    break
+
+                if (
+                    args.idle_timeout is not None
+                    and now - last_message_at >= args.idle_timeout
+                ):
+                    print(
+                        "No new messages received for "
+                        f"{args.idle_timeout} seconds. "
+                        "Consumer stopped."
+                    )
                     break
 
                 continue
 
             if message.error():
-                if message.error().code() == KafkaError._PARTITION_EOF:
+                if (
+                    message.error().code()
+                    == KafkaError._PARTITION_EOF
+                ):
                     continue
 
                 raise RuntimeError(message.error())
-            
+
             contract = contracts_by_topic.get(
                 message.topic()
             )
@@ -197,6 +227,8 @@ def main() -> None:
                 message=message,
                 asynchronous=False,
             )
+
+            last_message_at = time.monotonic()
 
             if args.once:
                 break
