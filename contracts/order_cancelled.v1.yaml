@@ -1,0 +1,45 @@
+name: order_cancelled
+version: 1
+topic: ecommerce.order_cancelled.v1
+owner: orders-team
+
+key:
+  - order_id
+
+schema:
+  allow_extra_fields: false
+
+  fields:
+    - name: order_id
+      type: string
+      nullable: false
+
+    - name: cancellation_id
+      type: string
+      nullable: false
+
+    - name: cancellation_reason
+      type: string
+      nullable: false
+      enum:
+        - customer_request
+        - payment_failed
+        - out_of_stock
+        - fraud_rejected
+
+    - name: cancelled_at
+      type: timestamp
+      nullable: false
+
+quality:
+  unique_key:
+    - cancellation_id
+
+  not_null:
+    - order_id
+    - cancellation_id
+    - cancellation_reason
+    - cancelled_at
+
+compatibility:
+  mode: backward

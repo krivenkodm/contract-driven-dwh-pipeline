@@ -8,7 +8,10 @@ from typing import Any
 from confluent_kafka import Consumer, KafkaError, Message
 from dotenv import load_dotenv
 
-from contract_loader import load_contract
+from contract_registry import (
+    load_contracts,
+    map_contracts_by_topic,
+)
 from dwh_writer import DwhWriter
 from validator import validate_event
 
@@ -109,12 +112,18 @@ def main() -> None:
 
     load_dotenv()
 
-    contract = load_contract(
+    contracts = load_contracts(
         os.getenv(
-            "CONTRACT_PATH",
-            "contracts/order_created.v1.yaml",
+            "CONTRACTS_DIR",
+            "contracts",
         )
     )
+
+    contracts_by_topic = map_contracts_by_topic(
+        contracts
+    )
+
+    topics = sorted(contracts_by_topic)
 
     consumer = Consumer(
         {
@@ -138,12 +147,13 @@ def main() -> None:
         )
     )
 
-    consumer.subscribe([contract["topic"]])
+    consumer.subscribe(topics)
 
     started_at = time.monotonic()
 
     print(
-        f"Consumer started. Topic: {contract['topic']}. "
+        "Consumer started. Topics: "
+        f"{', '.join(topics)}. "
         "Press Ctrl+C to stop."
     )
 
@@ -166,6 +176,16 @@ def main() -> None:
                     continue
 
                 raise RuntimeError(message.error())
+            
+            contract = contracts_by_topic.get(
+                message.topic()
+            )
+
+            if contract is None:
+                raise RuntimeError(
+                    "No contract registered for topic: "
+                    f"{message.topic()}"
+                )
 
             process_message(
                 message=message,

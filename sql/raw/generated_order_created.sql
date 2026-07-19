@@ -8,5 +8,5 @@ CREATE TABLE IF NOT EXISTS raw_order_created (
     amount numeric(12,2) NOT NULL,
     currency varchar NOT NULL,
     created_at timestamp NOT NULL,
-    CONSTRAINT uq_raw_order_created_kafka_offset UNIQUE (kafka_topic, kafka_partition, kafka_offset)
+    CONSTRAINT uq_raw_order_created_kafka_message UNIQUE (kafka_topic, kafka_partition, kafka_offset)
 );

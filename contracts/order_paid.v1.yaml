@@ -1,0 +1,45 @@
+name: order_paid
+version: 1
+topic: ecommerce.order_paid.v1
+owner: payments-team
+
+key:
+  - order_id
+
+schema:
+  allow_extra_fields: false
+
+  fields:
+    - name: order_id
+      type: string
+      nullable: false
+
+    - name: payment_id
+      type: string
+      nullable: false
+
+    - name: paid_amount
+      type: decimal(12,2)
+      nullable: false
+
+    - name: currency
+      type: string
+      nullable: false
+      enum: ["RUB", "USD", "EUR"]
+
+    - name: paid_at
+      type: timestamp
+      nullable: false
+
+quality:
+  unique_key:
+    - payment_id
+
+  not_null:
+    - order_id
+    - payment_id
+    - paid_amount
+    - paid_at
+
+compatibility:
+  mode: backward

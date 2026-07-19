@@ -2,13 +2,88 @@ import argparse
 import json
 import os
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
+from uuid import uuid4
 
 from confluent_kafka import Message, Producer
 from dotenv import load_dotenv
 
-from contract_loader import load_contract
+from contract_registry import (
+    load_contracts,
+    map_contracts_by_name,
+)
 from validator import validate_event
+
+
+EventBuilder = Callable[[str], dict[str, Any]]
+
+
+def current_timestamp() -> str:
+    return datetime.now(
+        timezone.utc
+    ).isoformat()
+
+
+def build_order_created(
+    order_id: str,
+) -> dict[str, Any]:
+    return {
+        "order_id": order_id,
+        "customer_id": "cust_777",
+        "amount": 1500.50,
+        "currency": "RUB",
+        "created_at": current_timestamp(),
+    }
+
+
+def build_order_paid(
+    order_id: str,
+) -> dict[str, Any]:
+    return {
+        "order_id": order_id,
+        "payment_id": f"pay_{uuid4().hex[:10]}",
+        "paid_amount": 1500.50,
+        "currency": "RUB",
+        "paid_at": current_timestamp(),
+    }
+
+
+def build_order_cancelled(
+    order_id: str,
+) -> dict[str, Any]:
+    return {
+        "order_id": order_id,
+        "cancellation_id": (
+            f"cancel_{uuid4().hex[:10]}"
+        ),
+        "cancellation_reason": (
+            "customer_request"
+        ),
+        "cancelled_at": current_timestamp(),
+    }
+
+
+EVENT_BUILDERS: dict[str, EventBuilder] = {
+    "order_created": build_order_created,
+    "order_paid": build_order_paid,
+    "order_cancelled": build_order_cancelled,
+}
+
+
+def make_event_invalid(
+    event_name: str,
+    event: dict[str, Any],
+) -> None:
+    event["unexpected_field"] = "test"
+
+    if event_name == "order_created":
+        event["amount"] = "not-a-number"
+
+    elif event_name == "order_paid":
+        event["paid_amount"] = "not-a-number"
+
+    elif event_name == "order_cancelled":
+        event["cancelled_at"] = "not-a-date"
 
 
 def delivery_callback(
@@ -27,24 +102,36 @@ def delivery_callback(
     )
 
 
-def build_event(invalid: bool = False) -> dict[str, Any]:
-    event: dict[str, Any] = {
-        "order_id": "ord_1001",
-        "customer_id": "cust_777",
-        "amount": 1500.50,
-        "currency": "RUB",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-    if invalid:
-        event["amount"] = "not-a-number"
-        event["unexpected_field"] = "test"
-
-    return event
-
-
 def main() -> None:
+    load_dotenv()
+
+    contracts_directory = os.getenv(
+        "CONTRACTS_DIR",
+        "contracts",
+    )
+
+    contracts = load_contracts(
+        contracts_directory
+    )
+
+    contracts_by_name = map_contracts_by_name(
+        contracts
+    )
+
     parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--event",
+        choices=sorted(contracts_by_name),
+        default="order_created",
+        help="Event contract name",
+    )
+
+    parser.add_argument(
+        "--order-id",
+        default="ord_1001",
+        help="Order identifier",
+    )
 
     parser.add_argument(
         "--invalid",
@@ -54,41 +141,53 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    load_dotenv()
+    contract = contracts_by_name[args.event]
 
-    contract_path = os.getenv(
-        "CONTRACT_PATH",
-        "contracts/order_created.v1.yaml",
-    )
+    builder = EVENT_BUILDERS.get(args.event)
 
-    bootstrap_servers = os.getenv(
-        "KAFKA_BOOTSTRAP_SERVERS",
-        "localhost:9092",
-    )
+    if builder is None:
+        raise ValueError(
+            f"No demo event builder for: {args.event}"
+        )
 
-    contract = load_contract(contract_path)
-    event = build_event(invalid=args.invalid)
+    event = builder(args.order_id)
 
-    if not args.invalid:
-        validation_errors = validate_event(event, contract)
+    if args.invalid:
+        make_event_invalid(
+            event_name=args.event,
+            event=event,
+        )
+    else:
+        errors = validate_event(
+            event=event,
+            contract=contract,
+        )
 
-        if validation_errors:
+        if errors:
             raise ValueError(
-                "Producer event is invalid: "
-                + "; ".join(validation_errors)
+                "Generated event is invalid: "
+                + "; ".join(errors)
             )
 
     key_fields = contract.get("key", [])
 
     if not key_fields:
-        raise ValueError("Contract must contain at least one key field")
+        raise ValueError(
+            f"Contract '{args.event}' has no key"
+        )
 
-    message_key = str(event[key_fields[0]])
+    message_key = "|".join(
+        str(event[field_name])
+        for field_name in key_fields
+    )
 
     producer = Producer(
         {
-            "bootstrap.servers": bootstrap_servers,
-            "client.id": "order-demo-producer",
+            "bootstrap.servers": os.getenv(
+                "KAFKA_BOOTSTRAP_SERVERS",
+                "localhost:9092",
+            ),
+            "client.id": "orders-demo-producer",
             "enable.idempotence": True,
         }
     )
@@ -100,11 +199,14 @@ def main() -> None:
         callback=delivery_callback,
     )
 
-    remaining_messages = producer.flush(timeout=10)
+    remaining_messages = producer.flush(
+        timeout=10
+    )
 
     if remaining_messages > 0:
         raise RuntimeError(
-            f"{remaining_messages} message(s) were not delivered"
+            f"{remaining_messages} messages "
+            "were not delivered"
         )
 
 
