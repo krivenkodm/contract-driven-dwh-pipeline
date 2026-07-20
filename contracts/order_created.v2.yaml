@@ -1,0 +1,37 @@
+name: order_created
+version: 2
+topic: ecommerce.order_created.v2
+
+owner: orders-team
+
+compatibility:
+  mode: backward
+
+key:
+  - order_id
+
+schema:
+  fields:
+    - name: order_id
+      type: string
+      nullable: false
+
+    - name: customer_id
+      type: string
+      nullable: false
+
+    - name: amount
+      type: decimal(12,2)
+      nullable: false
+
+    - name: currency
+      type: string
+      nullable: false
+
+    - name: created_at
+      type: timestamp
+      nullable: false
+
+    - name: source_channel
+      type: string
+      nullable: true

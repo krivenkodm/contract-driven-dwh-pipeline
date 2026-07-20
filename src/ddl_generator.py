@@ -1,8 +1,12 @@
 import os
 import re
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from compatibility_checker import (
+    check_all_contracts,
+)
 from contract_registry import load_contracts
 
 
@@ -20,43 +24,100 @@ IDENTIFIER_PATTERN = re.compile(
 )
 
 
-def validate_identifier(identifier: str) -> None:
-    if not IDENTIFIER_PATTERN.fullmatch(identifier):
+Contract = dict[str, Any]
+
+
+def validate_identifier(
+    identifier: str,
+) -> None:
+    if not IDENTIFIER_PATTERN.fullmatch(
+        identifier
+    ):
         raise ValueError(
             f"Invalid SQL identifier: {identifier}"
         )
 
 
-def to_sql_type(contract_type: str) -> str:
+def to_sql_type(
+    contract_type: str,
+) -> str:
     if contract_type.startswith("decimal"):
-        match = DECIMAL_PATTERN.fullmatch(contract_type)
+        match = DECIMAL_PATTERN.fullmatch(
+            contract_type
+        )
 
         if not match:
             raise ValueError(
-                f"Invalid decimal type: {contract_type}"
+                "Invalid decimal type: "
+                f"{contract_type}"
             )
 
         precision, scale = match.groups()
 
-        return f"numeric({precision},{scale})"
+        return (
+            f"numeric({precision},{scale})"
+        )
 
     if contract_type not in TYPE_MAPPING:
         raise ValueError(
-            f"Unsupported contract type: {contract_type}"
+            "Unsupported contract type: "
+            f"{contract_type}"
         )
 
     return TYPE_MAPPING[contract_type]
 
 
+def get_latest_contracts(
+    contracts: list[Contract],
+) -> list[Contract]:
+    contracts_by_name: dict[
+        str,
+        list[Contract],
+    ] = defaultdict(list)
+
+    for contract in contracts:
+        contracts_by_name[
+            contract["name"]
+        ].append(
+            contract
+        )
+
+    latest_contracts: list[Contract] = []
+
+    for name, versions in contracts_by_name.items():
+        latest_contract = max(
+            versions,
+            key=lambda contract: contract["version"],
+        )
+
+        latest_contracts.append(
+            latest_contract
+        )
+
+    return sorted(
+        latest_contracts,
+        key=lambda contract: contract["name"],
+    )
+
+
 def generate_raw_ddl(
-    contract: dict[str, Any],
+    contract: Contract,
 ) -> str:
     contract_name = contract["name"]
-    validate_identifier(contract_name)
+    contract_version = contract["version"]
+
+    validate_identifier(
+        contract_name
+    )
 
     table_name = f"raw_{contract_name}"
 
     columns = [
+        (
+            "raw_id bigint "
+            "GENERATED ALWAYS AS IDENTITY "
+            "PRIMARY KEY"
+        ),
         "kafka_topic varchar NOT NULL",
         "kafka_partition integer NOT NULL",
         "kafka_offset bigint NOT NULL",
@@ -65,19 +126,35 @@ def generate_raw_ddl(
 
     for field in contract["schema"]["fields"]:
         field_name = field["name"]
-        validate_identifier(field_name)
 
-        sql_type = to_sql_type(field["type"])
-        nullable = field.get("nullable", True)
+        validate_identifier(
+            field_name
+        )
 
-        not_null = " NOT NULL" if not nullable else ""
+        sql_type = to_sql_type(
+            field["type"]
+        )
+
+        nullable = field.get(
+            "nullable",
+            True,
+        )
+
+        not_null = (
+            " NOT NULL"
+            if not nullable
+            else ""
+        )
 
         columns.append(
-            f"{field_name} {sql_type}{not_null}"
+            f"{field_name} "
+            f"{sql_type}"
+            f"{not_null}"
         )
 
     columns.append(
-        f"CONSTRAINT uq_{table_name}_kafka_message "
+        f"CONSTRAINT "
+        f"uq_{table_name}_kafka_message "
         "UNIQUE ("
         "kafka_topic, "
         "kafka_partition, "
@@ -85,10 +162,15 @@ def generate_raw_ddl(
         ")"
     )
 
-    columns_sql = ",\n    ".join(columns)
+    columns_sql = ",\n    ".join(
+        columns
+    )
 
     return (
-        f"CREATE TABLE IF NOT EXISTS {table_name} (\n"
+        f"-- Generated from "
+        f"{contract_name} v{contract_version}\n"
+        f"CREATE TABLE IF NOT EXISTS "
+        f"{table_name} (\n"
         f"    {columns_sql}\n"
         ");\n"
     )
@@ -96,10 +178,16 @@ def generate_raw_ddl(
 
 def main() -> None:
     contracts_directory = Path(
-        os.getenv("CONTRACTS_DIR", "contracts")
+        os.getenv(
+            "CONTRACTS_DIR",
+            "contracts",
+        )
     )
 
-    output_directory = Path("sql/raw")
+    output_directory = Path(
+        "sql/raw"
+    )
+
     output_directory.mkdir(
         parents=True,
         exist_ok=True,
@@ -109,13 +197,40 @@ def main() -> None:
         contracts_directory
     )
 
-    for contract in contracts:
-        output_path = (
-            output_directory
-            / f"generated_{contract['name']}.sql"
+    compatibility_errors = (
+        check_all_contracts(
+            contracts
+        )
+    )
+
+    if compatibility_errors:
+        formatted_errors = "\n".join(
+            f"  - {error}"
+            for error in compatibility_errors
         )
 
-        ddl = generate_raw_ddl(contract)
+        raise ValueError(
+            "Contract compatibility "
+            "check failed:\n"
+            f"{formatted_errors}"
+        )
+
+    latest_contracts = get_latest_contracts(
+        contracts
+    )
+
+    for contract in latest_contracts:
+        output_path = (
+            output_directory
+            / (
+                f"generated_"
+                f"{contract['name']}.sql"
+            )
+        )
+
+        ddl = generate_raw_ddl(
+            contract
+        )
 
         output_path.write_text(
             ddl,
@@ -123,7 +238,9 @@ def main() -> None:
         )
 
         print(
-            f"DDL generated: {output_path}"
+            "DDL generated: "
+            f"{output_path} "
+            f"from v{contract['version']}"
         )
 
 

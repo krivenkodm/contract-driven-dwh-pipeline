@@ -1,4 +1,6 @@
+-- Generated from order_paid v1
 CREATE TABLE IF NOT EXISTS raw_order_paid (
+    raw_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     kafka_topic varchar NOT NULL,
     kafka_partition integer NOT NULL,
     kafka_offset bigint NOT NULL,

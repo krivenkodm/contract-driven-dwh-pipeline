@@ -1,144 +1,228 @@
 PYTHON := .venv/bin/python
 
-TOPICS := \
-	ecommerce.order_created.v1 \
-	ecommerce.order_paid.v1 \
-	ecommerce.order_cancelled.v1
-
 EVENT ?= order_created
 ORDER_ID ?= ord_1001
+VERSION ?=
+SOURCE_CHANNEL ?=
+
+POSTGRES_CONTAINER := contract_dwh_postgres
+POSTGRES_USER := dwh
+POSTGRES_DB := dwh
+
 
 .PHONY: \
 	up \
 	down \
+	reset \
 	status \
 	logs \
+	logs-consumer \
+	logs-redpanda \
+	logs-topic-init \
+	psql \
+	check-contracts \
 	generate-ddl \
 	init-db \
 	create-topics \
 	produce \
-	produce-invalid \
 	produce-created \
 	produce-paid \
 	produce-cancelled \
 	consume \
 	consume-once \
-	psql \
 	build-dds \
 	build-mart \
 	build-analytics \
 	rebuild-from-kafka \
 	test \
-	test-unit \
-	test-integration \
-	test-all
+	demo \
+	e2e
+
 
 up:
-	docker compose up -d
+	docker compose up -d --build
+
 
 down:
 	docker compose down
 
+
+reset:
+	docker compose down -v
+
+
 status:
-	docker compose ps
+	docker compose ps -a
+
 
 logs:
-	docker compose logs --tail=100
+	docker compose logs -f
 
-generate-ddl:
+
+logs-consumer:
+	docker compose logs -f consumer
+
+
+logs-redpanda:
+	docker compose logs -f redpanda
+
+
+logs-topic-init:
+	docker compose logs topic-init
+
+
+psql:
+	docker exec -it $(POSTGRES_CONTAINER) \
+		psql \
+		-U $(POSTGRES_USER) \
+		-d $(POSTGRES_DB)
+
+
+check-contracts:
+	CONTRACTS_DIR=contracts \
+	$(PYTHON) src/compatibility_checker.py
+
+
+generate-ddl: check-contracts
+	CONTRACTS_DIR=contracts \
 	$(PYTHON) src/ddl_generator.py
 
+
 init-db: generate-ddl
-	@for file in sql/raw/generated_*.sql; do \
-		echo "Applying $$file"; \
-		docker exec -i contract_dwh_postgres \
-			psql -U dwh -d dwh < $$file; \
+	@set -e; \
+	for file in sql/raw/*.sql; do \
+		if [ -f "$$file" ]; then \
+			echo "Applying $$file"; \
+			docker exec -i $(POSTGRES_CONTAINER) \
+				psql \
+				-U $(POSTGRES_USER) \
+				-d $(POSTGRES_DB) \
+				-v ON_ERROR_STOP=1 \
+				< "$$file"; \
+		fi; \
 	done
-	docker exec -i contract_dwh_postgres \
-		psql -U dwh -d dwh \
-		< sql/raw/dead_letter_events.sql
+
 
 create-topics:
-	@for topic in $(TOPICS); do \
-		echo "Creating topic $$topic"; \
-		docker exec contract_redpanda \
-			rpk topic create $$topic \
-			--brokers localhost:9092 || true; \
-	done
+	KAFKA_BOOTSTRAP_SERVERS=localhost:19092 \
+	CONTRACTS_DIR=contracts \
+	$(PYTHON) src/topic_manager.py
+
 
 produce:
 	$(PYTHON) src/producer.py \
 		--event $(EVENT) \
-		--order-id $(ORDER_ID)
-
-produce-invalid:
-	$(PYTHON) src/producer.py \
-		--event $(EVENT) \
 		--order-id $(ORDER_ID) \
-		--invalid
+		$(if $(strip $(VERSION)),--version $(VERSION),) \
+		$(if $(strip $(SOURCE_CHANNEL)),--source-channel $(SOURCE_CHANNEL),)
+
 
 produce-created:
 	$(MAKE) produce \
 		EVENT=order_created \
-		ORDER_ID=ord_1001
+		ORDER_ID=$(ORDER_ID) \
+		VERSION=$(VERSION) \
+		SOURCE_CHANNEL=$(SOURCE_CHANNEL)
+
 
 produce-paid:
 	$(MAKE) produce \
 		EVENT=order_paid \
-		ORDER_ID=ord_1001
+		ORDER_ID=$(ORDER_ID) \
+		VERSION=$(VERSION)
+
 
 produce-cancelled:
 	$(MAKE) produce \
 		EVENT=order_cancelled \
-		ORDER_ID=ord_1002
+		ORDER_ID=$(ORDER_ID) \
+		VERSION=$(VERSION)
+
 
 consume:
 	$(PYTHON) src/consumer.py
 
+
 consume-once:
 	$(PYTHON) src/consumer.py --once
 
-psql:
-	docker exec -it contract_dwh_postgres \
-		psql -U dwh -d dwh
 
 build-dds:
-	docker exec -i contract_dwh_postgres \
-		psql -U dwh -d dwh \
+	docker exec -i $(POSTGRES_CONTAINER) \
+		psql \
+		-U $(POSTGRES_USER) \
+		-d $(POSTGRES_DB) \
+		-v ON_ERROR_STOP=1 \
 		< sql/dds/orders.sql
 
+
 build-mart:
-	docker exec -i contract_dwh_postgres \
-		psql -U dwh -d dwh \
+	docker exec -i $(POSTGRES_CONTAINER) \
+		psql \
+		-U $(POSTGRES_USER) \
+		-d $(POSTGRES_DB) \
+		-v ON_ERROR_STOP=1 \
 		< sql/mart/daily_orders.sql
+
 
 build-analytics:
 	$(MAKE) build-dds
 	$(MAKE) build-mart
 
+
 rebuild-from-kafka:
-	docker exec -i contract_dwh_postgres \
-		psql -U dwh -d dwh \
-		-c "TRUNCATE mart_daily_orders, dds_orders, raw_order_created, raw_order_paid, raw_order_cancelled, dead_letter_events;"
-
+	@set -e; \
+	echo "Stopping permanent consumer"; \
+	docker compose stop consumer; \
+	trap 'docker compose start consumer >/dev/null' EXIT; \
+	echo "Truncating DWH tables"; \
+	docker exec -i $(POSTGRES_CONTAINER) \
+		psql \
+		-U $(POSTGRES_USER) \
+		-d $(POSTGRES_DB) \
+		-v ON_ERROR_STOP=1 \
+		-c "TRUNCATE \
+			mart_daily_orders, \
+			mart_watermarks, \
+			dds_orders, \
+			etl_watermarks, \
+			raw_order_created, \
+			raw_order_paid, \
+			raw_order_cancelled, \
+			dead_letter_events \
+			RESTART IDENTITY; \
+			ALTER SEQUENCE dds_orders_change_id_seq \
+			RESTART WITH 1;"; \
+	echo "Replaying Kafka topics"; \
 	CONSUMER_GROUP_ID=contract-dwh-replay-$$(date +%s) \
-		$(PYTHON) src/consumer.py --idle-timeout 5
-
+	KAFKA_BOOTSTRAP_SERVERS=localhost:19092 \
+	POSTGRES_DSN=postgresql://dwh:dwh@localhost:55432/dwh \
+	CONTRACTS_DIR=contracts \
+	$(PYTHON) src/consumer.py --idle-timeout 5; \
+	echo "Building DDS and MART"; \
 	$(MAKE) build-analytics
+
 
 test:
 	$(PYTHON) -m pytest -v
 
-test-unit:
-	$(PYTHON) -m pytest tests/ -v
 
-test-integration:
-	$(MAKE) rebuild-from-kafka
-	docker exec -i contract_dwh_postgres \
-		psql -U dwh -d dwh \
-		-v ON_ERROR_STOP=1 \
-		< sql/tests/check_pipeline.sql
+demo:
+	$(MAKE) produce-created \
+		ORDER_ID=ord_demo_1 \
+		VERSION=2 \
+		SOURCE_CHANNEL=mobile_app
 
-test-all:
-	$(MAKE) test
-	$(MAKE) test-integration
+	$(MAKE) produce-paid \
+		ORDER_ID=ord_demo_1
+
+	$(MAKE) produce-created \
+		ORDER_ID=ord_demo_2 \
+		VERSION=1
+
+	$(MAKE) produce-cancelled \
+		ORDER_ID=ord_demo_2
+
+
+e2e:
+	./scripts/e2e_smoke.sh

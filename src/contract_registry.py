@@ -1,67 +1,239 @@
 from pathlib import Path
 from typing import Any
 
-from contract_loader import load_contract
+import yaml
+
+
+Contract = dict[str, Any]
+
+
+def load_contract(
+    contract_path: Path,
+) -> Contract:
+    with contract_path.open(
+        "r",
+        encoding="utf-8",
+    ) as file:
+        contract = yaml.safe_load(file)
+
+    if not isinstance(contract, dict):
+        raise ValueError(
+            f"Contract must be a mapping: "
+            f"{contract_path}"
+        )
+
+    required_fields = {
+        "name",
+        "version",
+        "topic",
+        "schema",
+    }
+
+    missing_fields = (
+        required_fields
+        - contract.keys()
+    )
+
+    if missing_fields:
+        formatted_fields = ", ".join(
+            sorted(missing_fields)
+        )
+
+        raise ValueError(
+            f"Contract {contract_path} "
+            f"is missing fields: "
+            f"{formatted_fields}"
+        )
+
+    name = contract["name"]
+    version = contract["version"]
+    topic = contract["topic"]
+
+    if not isinstance(name, str):
+        raise ValueError(
+            f"Contract name must be a string: "
+            f"{contract_path}"
+        )
+
+    if not isinstance(version, int):
+        raise ValueError(
+            f"Contract version must be an integer: "
+            f"{contract_path}"
+        )
+
+    if version <= 0:
+        raise ValueError(
+            f"Contract version must be positive: "
+            f"{contract_path}"
+        )
+
+    if not isinstance(topic, str):
+        raise ValueError(
+            f"Contract topic must be a string: "
+            f"{contract_path}"
+        )
+
+    schema = contract["schema"]
+
+    if not isinstance(schema, dict):
+        raise ValueError(
+            f"Contract schema must be a mapping: "
+            f"{contract_path}"
+        )
+
+    fields = schema.get("fields")
+
+    if not isinstance(fields, list):
+        raise ValueError(
+            f"Contract schema.fields must be a list: "
+            f"{contract_path}"
+        )
+
+    return contract
 
 
 def load_contracts(
-    contracts_directory: str | Path,
-) -> list[dict[str, Any]]:
-    directory = Path(contracts_directory)
+    contracts_directory: Path,
+) -> list[Contract]:
+    contracts_directory = Path(
+        contracts_directory
+    )
 
-    if not directory.exists():
-        raise FileNotFoundError(
-            f"Contracts directory does not exist: {directory}"
+    if not contracts_directory.exists():
+        raise ValueError(
+            "Contracts directory does not exist: "
+            f"{contracts_directory}"
         )
 
-    contract_paths = sorted(directory.glob("*.yaml"))
+    contract_paths = sorted(
+        [
+            *contracts_directory.glob("*.yaml"),
+            *contracts_directory.glob("*.yml"),
+        ]
+    )
 
     if not contract_paths:
         raise ValueError(
-            f"No YAML contracts found in: {directory}"
+            "No contract files found in: "
+            f"{contracts_directory}"
         )
 
-    contracts = [
-        load_contract(contract_path)
-        for contract_path in contract_paths
-    ]
+    contracts: list[Contract] = []
 
-    contract_names: set[str] = set()
-    contract_topics: set[str] = set()
+    contract_versions: set[
+        tuple[str, int]
+    ] = set()
 
-    for contract in contracts:
+    topics: set[str] = set()
+
+    for contract_path in contract_paths:
+        contract = load_contract(
+            contract_path
+        )
+
         name = contract["name"]
+        version = contract["version"]
         topic = contract["topic"]
 
-        if name in contract_names:
+        contract_version = (
+            name,
+            version,
+        )
+
+        if contract_version in contract_versions:
             raise ValueError(
-                f"Duplicate contract name: {name}"
+                "Duplicate contract version: "
+                f"{name} v{version}"
             )
 
-        if topic in contract_topics:
+        if topic in topics:
+            raise ValueError(
+                f"Duplicate contract topic: "
+                f"{topic}"
+            )
+
+        contract_versions.add(
+            contract_version
+        )
+
+        topics.add(
+            topic
+        )
+
+        contracts.append(
+            contract
+        )
+
+    return sorted(
+        contracts,
+        key=lambda contract: (
+            contract["name"],
+            contract["version"],
+        ),
+    )
+
+
+def get_contract(
+    contracts: list[Contract],
+    name: str,
+    version: int | None = None,
+) -> Contract:
+    matching_contracts = [
+        contract
+        for contract in contracts
+        if contract["name"] == name
+    ]
+
+    if not matching_contracts:
+        raise ValueError(
+            f"Contract not found: {name}"
+        )
+
+    if version is None:
+        return max(
+            matching_contracts,
+            key=lambda contract: (
+                contract["version"]
+            ),
+        )
+
+    for contract in matching_contracts:
+        if contract["version"] == version:
+            return contract
+
+    raise ValueError(
+        f"Contract not found: "
+        f"{name} v{version}"
+    )
+
+
+def map_contracts_by_topic(
+    contracts: list[Contract],
+) -> dict[str, Contract]:
+    contracts_by_topic: dict[str, Contract] = {}
+
+    for contract in contracts:
+        topic = contract["topic"]
+
+        if topic in contracts_by_topic:
             raise ValueError(
                 f"Duplicate contract topic: {topic}"
             )
 
-        contract_names.add(name)
-        contract_topics.add(topic)
+        contracts_by_topic[topic] = contract
 
-    return contracts
-
-
-def map_contracts_by_name(
-    contracts: list[dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
-    return {
-        contract["name"]: contract
-        for contract in contracts
-    }
+    return contracts_by_topic
 
 
-def map_contracts_by_topic(
-    contracts: list[dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
-    return {
-        contract["topic"]: contract
-        for contract in contracts
-    }
+def get_contract_by_topic(
+    contracts: list[Contract],
+    topic: str,
+) -> Contract:
+    for contract in contracts:
+        if contract["topic"] == topic:
+            return contract
+
+    raise ValueError(
+        f"Contract not found for topic: "
+        f"{topic}"
+    )

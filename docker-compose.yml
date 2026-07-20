@@ -1,39 +1,109 @@
 services:
   redpanda:
-    image: redpandadata/redpanda:latest
+    image: docker.redpanda.com/redpandadata/redpanda:v26.1.12
     container_name: contract_redpanda
+
     command:
       - redpanda
       - start
-      - --overprovisioned
+      - --kafka-addr
+      - internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr
+      - internal://redpanda:9092,external://localhost:19092
+      - --rpc-addr
+      - 0.0.0.0:33145
+      - --advertise-rpc-addr
+      - redpanda:33145
+      - --mode
+      - dev-container
       - --smp
       - "1"
-      - --memory
-      - "1G"
-      - --reserve-memory
-      - "0M"
-      - --node-id
-      - "0"
-      - --check=false
-      - --kafka-addr
-      - PLAINTEXT://0.0.0.0:9092
-      - --advertise-kafka-addr
-      - PLAINTEXT://localhost:9092
+      - --default-log-level=info
+
     ports:
-      - "9092:9092"
+      - "19092:19092"
       - "9644:9644"
+
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+
+    restart: unless-stopped
+
 
   postgres:
     image: postgres:16
     container_name: contract_dwh_postgres
+
     environment:
       POSTGRES_USER: dwh
       POSTGRES_PASSWORD: dwh
       POSTGRES_DB: dwh
+
     ports:
       - "55432:5432"
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U dwh -d dwh
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+    restart: unless-stopped
+
+
+  topic-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: contract_dwh_topic_init
+
+    command:
+      - python
+      - src/topic_manager.py
+
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      CONTRACTS_DIR: /app/contracts
+
+    depends_on:
+      redpanda:
+        condition: service_started
+
+    restart: "no"
+
+
+  consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: contract_dwh_consumer
+
+    command:
+      - python
+      - src/consumer.py
+
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      POSTGRES_DSN: postgresql://dwh:dwh@postgres:5432/dwh
+      CONTRACTS_DIR: /app/contracts
+      CONSUMER_GROUP_ID: contract-dwh-loader-v1
+
+    depends_on:
+      topic-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+
+    restart: unless-stopped
+
+
 volumes:
   postgres_data:
+  redpanda_data:
