@@ -81,6 +81,11 @@ The pipeline uses this contract to:
            v
 ┌─────────────────────┐
 │ Incremental Mart    │
+└──────────┬──────────┘
+           v
+┌─────────────────────┐
+│ Operational models  │
+│ + Grafana dashboard │
 └─────────────────────┘
 ```
 
@@ -95,6 +100,7 @@ The pipeline uses this contract to:
 * Docker Compose
 * pytest
 * dbt Core with the PostgreSQL adapter
+* Grafana
 * GitHub Actions
 * Makefile
 
@@ -121,6 +127,7 @@ contract-driven-dwh-pipeline/
 │   ├── consumer.py
 │   ├── dwh_writer.py
 │   ├── analytics_runner.py
+│   ├── monitoring_config_checker.py
 │   └── topic_manager.py
 │
 ├── sql/
@@ -135,9 +142,15 @@ contract-driven-dwh-pipeline/
 │   │   ├── staging/
 │   │   ├── intermediate/
 │   │   ├── dds/
-│   │   └── marts/
+│   │   ├── marts/
+│   │   └── monitoring/
 │   ├── snapshots/
 │   └── tests/
+│
+├── monitoring/grafana/
+│   ├── dashboards/
+│   ├── provisioning/
+│   └── init_reader.sql
 │
 ├── scripts/
 │   ├── migrate.sh
@@ -523,7 +536,72 @@ when freshness warns/fails or the dbt build fails.
 
 ---
 
-## 13. Example Mart
+## 13. Operational Monitoring Dashboard
+
+The repository contains a provisioned Grafana 13 dashboard backed by six dbt
+views in the dedicated `dbt_monitoring` schema. The views are the governed
+source for the dashboard; Grafana does not query RAW, DDS, or audit tables
+directly.
+
+Start the complete monitoring stack:
+
+```bash
+make monitoring-up
+```
+
+This command bootstraps the pipeline, runs one observed dbt build, configures a
+read-only PostgreSQL role, and starts the scheduler plus Grafana. Open:
+
+```text
+http://localhost:3000/d/contract-dwh-operations
+```
+
+The default local dashboard is available anonymously as Viewer and is bound
+only to `127.0.0.1`. The default admin credentials are `admin` / `admin`; set
+`GRAFANA_ADMIN_PASSWORD` before starting when the admin UI is needed. The
+Grafana datasource uses `grafana_reader`, which has `SELECT` only on
+`dbt_monitoring` and starts every database session in read-only mode.
+
+Useful operational commands:
+
+```bash
+make monitoring-health   # compact SQL health summary
+make monitoring-check    # Grafana API plus SQL health check
+make monitoring-status
+make monitoring-logs
+make monitoring-down     # stop Grafana and the scheduler only
+```
+
+The default dashboard refresh is 30 seconds and the time filter is 24 hours.
+It contains:
+
+* pipeline health and the primary diagnostic reason;
+* RAW freshness and successful-build age;
+* 24-hour build success rate;
+* DLQ, DDS quality, and orphan-event guardrails;
+* dbt duration and RAW/DLQ volume trends;
+* DQ issue breakdowns and recent run/error tables.
+
+The health model uses explicit operating thresholds:
+
+* `critical` — latest completed build failed, no successful build for 15
+  minutes, no `order_created` heartbeat, or RAW is over 60 minutes stale;
+* `warning` — freshness warning, RAW over 15 minutes stale, DLQ activity in the
+  last 24 hours, current DDS quality issues, or orphan events;
+* `healthy` — none of the conditions above are present.
+
+Grafana provisions a critical alert when `health_code > 1` for two minutes.
+External webhook delivery for dbt warnings and failures remains available
+through `ALERT_WEBHOOK_URL` on the analytics runner. Validate the dashboard,
+datasource, and alert configuration without starting Grafana:
+
+```bash
+make validate-monitoring-config
+```
+
+---
+
+## 14. Example Mart
 
 ```sql
 CREATE TABLE mart_daily_order_revenue AS
@@ -540,7 +618,7 @@ GROUP BY
 
 ---
 
-## 14. Compatibility Rules
+## 15. Compatibility Rules
 
 Allowed changes:
 
@@ -576,7 +654,7 @@ compatible.
 
 ---
 
-## 15. Data Quality Checks
+## 16. Data Quality Checks
 
 The current pipeline validates required fields, types, enums and timestamp
 timezones before RAW insertion. DDS also exposes business data quality flags:
@@ -617,7 +695,7 @@ Further useful checks:
 
 ---
 
-## 16. What This Project Demonstrates
+## 17. What This Project Demonstrates
 
 This project demonstrates practical knowledge of:
 
@@ -639,28 +717,33 @@ This project demonstrates practical knowledge of:
 * source freshness SLAs and dbt artifact parsing
 * scheduled, concurrency-safe analytics execution
 * persistent run history and webhook alerting
+* governed operational dbt models and health classification
+* provisioned Grafana dashboards, read-only access, and alert rules
 * safe side-by-side SQL-to-dbt parity validation
 * database-backed integration and migration testing
 * automated CI with end-to-end verification
 
 ---
 
-## 17. Resume Description
+## 18. Resume Description
 
 Built a contract-driven DWH ingestion pipeline using Python, PostgreSQL,
 Kafka-compatible streaming with Redpanda, and dbt. Implemented automatic RAW
 DDL generation, event validation, dead-letter handling, idempotent ingestion,
 incremental DDS and marts, historical snapshots, parity checks, database
 integration tests, source freshness monitoring, scheduled dbt execution,
-persistent run observability, and end-to-end CI.
+persistent run observability, governed operational metrics, a provisioned
+Grafana dashboard with alerting, and end-to-end CI.
 
 ---
 
-## 18. Future Improvements
+## 19. Future Improvements
 
 * add Schema Registry with Avro or Protobuf serialization
 * integrate a production orchestrator such as Airflow or Dagster
-* add historical DDS loading and a BI dashboard
+* add historical DDS loading
+* replace the demo event heartbeat with a dedicated ingestion heartbeat
+* move Grafana authentication and alert delivery to managed infrastructure
 * retain Kafka headers and producer/schema identifiers
 
 ---

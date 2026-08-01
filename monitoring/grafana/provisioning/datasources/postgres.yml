@@ -1,0 +1,25 @@
+apiVersion: 1
+
+prune: true
+
+datasources:
+  - name: Contract DWH PostgreSQL
+    type: postgres
+    uid: contract-dwh-postgres
+    access: proxy
+    url: postgres:5432
+    user: $DWH_GRAFANA_USER
+    isDefault: true
+    editable: false
+    version: 1
+    jsonData:
+      database: dwh
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: false
+      timeInterval: 1m
+      maxOpenConns: 5
+      maxIdleConns: 2
+      connMaxLifetime: 300
+    secureJsonData:
+      password: $DWH_GRAFANA_PASSWORD

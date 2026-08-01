@@ -42,6 +42,9 @@ jobs:
       - name: Validate data contracts
         run: make check-contracts
 
+      - name: Validate monitoring configuration
+        run: make validate-monitoring-config
+
       - name: Run unit tests
         run: make test-unit
 

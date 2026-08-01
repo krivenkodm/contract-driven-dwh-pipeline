@@ -499,6 +499,37 @@ def test_dbt_incremental_models_match_legacy_and_move_mart_date(
                 """
             ).fetchone()
 
+            monitoring_relations = connection.execute(
+                """
+                SELECT table_name
+                FROM information_schema.views
+                WHERE table_schema = 'dbt_monitoring'
+                ORDER BY table_name
+                """
+            ).fetchall()
+
+            monitoring_health = connection.execute(
+                """
+                SELECT
+                    overall_health,
+                    health_code,
+                    freshness_status,
+                    build_status,
+                    build_success_rate_24h,
+                    dead_letter_count_24h,
+                    dq_affected_orders,
+                    orphan_order_count
+                FROM dbt_monitoring.monitor_pipeline_health
+                """
+            ).fetchone()
+
+            monitoring_dq_issues = connection.execute(
+                """
+                SELECT count(*), sum(affected_orders)
+                FROM dbt_monitoring.monitor_data_quality_issues
+                """
+            ).fetchone()
+
         assert first_dds_row is not None
         assert first_dds_row[0:2] == (
             "paid",
@@ -515,6 +546,24 @@ def test_dbt_incremental_models_match_legacy_and_move_mart_date(
             "success",
         )
         assert observed_run[4] > 0
+        assert monitoring_relations == [
+            ("monitor_analytics_runs",),
+            ("monitor_data_quality_issues",),
+            ("monitor_dead_letter_volume_hourly",),
+            ("monitor_pipeline_health",),
+            ("monitor_raw_event_volume_hourly",),
+            ("monitor_recent_dead_letters",),
+        ]
+        assert monitoring_health is not None
+        assert monitoring_health[0:4] == (
+            "healthy",
+            0,
+            "pass",
+            "success",
+        )
+        assert monitoring_health[4] == 1
+        assert monitoring_health[5:8] == (0, 0, 0)
+        assert monitoring_dq_issues == (9, 0)
 
         run_dbt(
             database,
