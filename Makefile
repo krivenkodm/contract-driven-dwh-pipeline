@@ -46,6 +46,7 @@ INTEGRATION_POSTGRES_ADMIN_DSN ?= \
 	dbt-parse \
 	dbt-build \
 	dbt-parity \
+	verify-dbt-parity \
 	dbt-docs \
 	rebuild-from-kafka \
 	test \
@@ -265,6 +266,12 @@ dbt-parity:
 		--select tag:parity
 
 
+verify-dbt-parity:
+	$(MAKE) build-legacy-analytics
+	$(MAKE) dbt-build
+	$(MAKE) dbt-parity
+
+
 dbt-docs: postgres-up
 	DBT_DATABASE=$(POSTGRES_DB) \
 	$(DBT) docs generate \
@@ -273,9 +280,7 @@ dbt-docs: postgres-up
 
 
 build-analytics:
-	$(MAKE) build-legacy-analytics
 	$(MAKE) dbt-build
-	$(MAKE) dbt-parity
 
 
 rebuild-from-kafka:

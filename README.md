@@ -331,15 +331,14 @@ paid_revenue
 orders_with_dq_cnt
 ```
 
-During the rollout, `make build-analytics` builds both implementations:
+dbt is now the primary analytics implementation: `make build-analytics` builds
+the models in the `dbt` schema. The original SQL transformations remain as a
+regression oracle and are not executed in the regular pipeline.
 
-* the original SQL tables in the `public` schema;
-* the dbt models in the `dbt` schema.
-
-Three parity tests compare DDS, orphan-event DQ and MART business columns in
-both directions. The dbt mart gets affected old and new dates from the
-`dds_orders_history` snapshot, so a late event that moves an order to another
-day cannot leave a stale aggregate behind.
+`make verify-dbt-parity` explicitly builds the legacy SQL tables and runs three
+bidirectional comparisons for DDS, orphan-event DQ and MART. The dbt mart gets
+affected old and new dates from the `dds_orders_history` snapshot, so a late
+event that moves an order to another day cannot leave a stale aggregate behind.
 
 ---
 
@@ -403,7 +402,7 @@ Produce a set of demo events:
 make demo
 ```
 
-Build the legacy and dbt incremental analytics layers and verify parity:
+Build the primary dbt analytics layer:
 
 ```bash
 make build-analytics
@@ -415,7 +414,7 @@ Useful dbt-only commands:
 make dbt-parse     # validate project structure without a database
 make dbt-debug     # check the PostgreSQL connection
 make dbt-build     # build dbt models, snapshot and non-parity tests
-make dbt-parity    # compare dbt results with the legacy SQL tables
+make verify-dbt-parity  # optionally build legacy SQL and verify equivalence
 make dbt-docs      # generate the dbt catalog and documentation site
 ```
 

@@ -1,8 +1,8 @@
 # dbt analytics project
 
 This project is the transformation layer for the contract-driven DWH demo.
-Validated events remain in `public.raw_*`; dbt objects are isolated in the
-`dbt` schema during the migration from the original SQL implementation.
+Validated events remain in `public.raw_*`; dbt is the primary transformation
+engine and publishes analytical objects into the `dbt` schema.
 
 The model layers are:
 
@@ -16,10 +16,14 @@ The model layers are:
 tagged `parity` require the legacy SQL tables in `public` and compare their
 business columns with dbt in both directions.
 
+The legacy transformations are retained only as a regression oracle. The
+regular `make build-analytics` path does not execute them; use
+`make verify-dbt-parity` for an explicit side-by-side comparison.
+
 Use the repository Makefile so connection settings stay consistent:
 
 ```bash
 make dbt-build
-make dbt-parity
+make verify-dbt-parity
 make dbt-docs
 ```

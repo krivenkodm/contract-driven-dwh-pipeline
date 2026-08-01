@@ -211,27 +211,27 @@ echo "[7/8] Building DDS and MART"
 make build-analytics
 
 echo
-echo "[8/8] Checking DDS and MART"
+echo "[8/8] Checking dbt DDS and MART"
 
 dds_rows_count="$(
     psql_scalar "
         SELECT COUNT(*)
-        FROM dds_orders
+        FROM dbt.dds_orders
         WHERE order_id = '${ORDER_ID}';
     "
 )"
 
 if [[ "${dds_rows_count}" -lt 1 ]]; then
-    echo "ERROR: ${ORDER_ID} was not found in dds_orders"
+    echo "ERROR: ${ORDER_ID} was not found in dbt.dds_orders"
     exit 1
 fi
 
-echo "Found ${ORDER_ID} in dds_orders"
+echo "Found ${ORDER_ID} in dbt.dds_orders"
 
 valid_dds_state_count="$(
     psql_scalar "
         SELECT COUNT(*)
-        FROM dds_orders
+        FROM dbt.dds_orders
         WHERE order_id = '${ORDER_ID}'
           AND status = 'paid'
           AND payment_currency = currency
@@ -246,56 +246,28 @@ valid_dds_state_count="$(
 )"
 
 if [[ "${valid_dds_state_count}" -ne 1 ]]; then
-    echo "ERROR: ${ORDER_ID} has unexpected DDS or DQ state"
+    echo "ERROR: ${ORDER_ID} has unexpected dbt DDS or DQ state"
     exit 1
 fi
 
-echo "DDS status and DQ flags are valid"
+echo "dbt DDS status and DQ flags are valid"
 
 mart_rows_count="$(
-    psql_scalar "
-        SELECT COUNT(*)
-        FROM mart_daily_orders;
-    "
-)"
-
-if [[ "${mart_rows_count}" -lt 1 ]]; then
-    echo "ERROR: mart_daily_orders is empty"
-    exit 1
-fi
-
-echo "mart_daily_orders contains ${mart_rows_count} row(s)"
-
-dbt_dds_rows_count="$(
-    psql_scalar "
-        SELECT COUNT(*)
-        FROM dbt.dds_orders
-        WHERE order_id = '${ORDER_ID}'
-          AND status = 'paid';
-    "
-)"
-
-if [[ "${dbt_dds_rows_count}" -ne 1 ]]; then
-    echo "ERROR: ${ORDER_ID} has unexpected dbt DDS state"
-    exit 1
-fi
-
-dbt_mart_rows_count="$(
     psql_scalar "
         SELECT COUNT(*)
         FROM dbt.mart_daily_orders;
     "
 )"
 
-if [[ "${dbt_mart_rows_count}" -lt 1 ]]; then
+if [[ "${mart_rows_count}" -lt 1 ]]; then
     echo "ERROR: dbt.mart_daily_orders is empty"
     exit 1
 fi
 
-echo "dbt DDS and MART contain the expected result"
+echo "dbt.mart_daily_orders contains ${mart_rows_count} row(s)"
 
 echo
-echo "DDS result:"
+echo "dbt DDS result:"
 
 docker exec -i "${POSTGRES_CONTAINER}" \
     psql \
@@ -305,23 +277,8 @@ docker exec -i "${POSTGRES_CONTAINER}" \
     -x \
     -c "
         SELECT *
-        FROM dds_orders
+        FROM dbt.dds_orders
         WHERE order_id = '${ORDER_ID}';
-    "
-
-echo
-echo "MART result:"
-
-docker exec -i "${POSTGRES_CONTAINER}" \
-    psql \
-    -U "${POSTGRES_USER}" \
-    -d "${POSTGRES_DB}" \
-    -v ON_ERROR_STOP=1 \
-    -c "
-        SELECT *
-        FROM mart_daily_orders
-        ORDER BY 1 DESC
-        LIMIT 5;
     "
 
 echo
