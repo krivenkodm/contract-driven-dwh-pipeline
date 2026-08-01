@@ -23,7 +23,14 @@ regular `make build-analytics` path does not execute them; use
 Use the repository Makefile so connection settings stay consistent:
 
 ```bash
+make analytics-run
+make analytics-history
+make dbt-source-freshness
 make dbt-build
 make verify-dbt-parity
 make dbt-docs
 ```
+
+`raw_order_created` is the demo freshness heartbeat. The observed runner parses
+`sources.json` and `run_results.json`, then stores the combined status in
+`public.analytics_run_history`.

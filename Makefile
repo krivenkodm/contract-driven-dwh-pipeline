@@ -14,6 +14,12 @@ POSTGRES_DB := dwh
 
 INTEGRATION_POSTGRES_ADMIN_DSN ?= \
 	postgresql://dwh:dwh@localhost:55432/postgres
+ANALYTICS_POSTGRES_DSN ?= \
+	postgresql://dwh:dwh@localhost:55432/$(POSTGRES_DB)
+ANALYTICS_RUN_INTERVAL_SECONDS ?= 300
+ANALYTICS_TRIGGER ?= manual
+ANALYTICS_FAIL_ON_WARNING ?= 0
+ALERT_WEBHOOK_URL ?=
 
 
 .PHONY: \
@@ -45,9 +51,16 @@ INTEGRATION_POSTGRES_ADMIN_DSN ?= \
 	dbt-debug \
 	dbt-parse \
 	dbt-build \
+	dbt-source-freshness \
 	dbt-parity \
 	verify-dbt-parity \
 	dbt-docs \
+	analytics-run \
+	analytics-run-strict \
+	analytics-history \
+	orchestration-up \
+	orchestration-down \
+	orchestration-logs \
 	rebuild-from-kafka \
 	test \
 	test-unit \
@@ -258,6 +271,13 @@ dbt-build: migrate
 		--exclude tag:parity
 
 
+dbt-source-freshness: migrate
+	DBT_DATABASE=$(POSTGRES_DB) \
+	$(DBT) source freshness \
+		--project-dir $(DBT_PROJECT_DIR) \
+		--profiles-dir $(DBT_PROFILES_DIR)
+
+
 dbt-parity:
 	DBT_DATABASE=$(POSTGRES_DB) \
 	$(DBT) test \
@@ -279,8 +299,63 @@ dbt-docs: postgres-up
 		--profiles-dir $(DBT_PROFILES_DIR)
 
 
+analytics-run: migrate
+	POSTGRES_DSN=$(ANALYTICS_POSTGRES_DSN) \
+	DBT_DATABASE=$(POSTGRES_DB) \
+	ALERT_WEBHOOK_URL=$(ALERT_WEBHOOK_URL) \
+	$(PYTHON) src/analytics_runner.py \
+		--dbt-executable $(DBT) \
+		--project-dir $(DBT_PROJECT_DIR) \
+		--profiles-dir $(DBT_PROFILES_DIR) \
+		--trigger $(ANALYTICS_TRIGGER) $(if $(filter 1 true yes,$(ANALYTICS_FAIL_ON_WARNING)),--fail-on-warning,)
+
+
+analytics-run-strict:
+	$(MAKE) analytics-run ANALYTICS_FAIL_ON_WARNING=1
+
+
+analytics-history: migrate
+	docker exec -i $(POSTGRES_CONTAINER) \
+		psql \
+		-U $(POSTGRES_USER) \
+		-d $(POSTGRES_DB) \
+		-v ON_ERROR_STOP=1 \
+		-c "SELECT \
+			run_id, \
+			trigger_type, \
+			status, \
+			freshness_status, \
+			build_status, \
+			total_nodes, \
+			duration_seconds, \
+			started_at \
+		FROM analytics_run_history \
+		ORDER BY started_at DESC \
+		LIMIT 20;"
+
+
+orchestration-up: bootstrap
+	ANALYTICS_RUN_INTERVAL_SECONDS=$(ANALYTICS_RUN_INTERVAL_SECONDS) \
+	ALERT_WEBHOOK_URL=$(ALERT_WEBHOOK_URL) \
+	docker compose \
+		--profile orchestration \
+		up -d --build analytics-runner
+
+
+orchestration-down:
+	docker compose \
+		--profile orchestration \
+		stop analytics-runner
+
+
+orchestration-logs:
+	docker compose \
+		--profile orchestration \
+		logs -f analytics-runner
+
+
 build-analytics:
-	$(MAKE) dbt-build
+	$(MAKE) analytics-run
 
 
 rebuild-from-kafka:

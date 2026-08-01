@@ -60,7 +60,12 @@ def test_fresh_database_schema_and_migrations_are_idempotent(
             (5,),
             (6,),
             (7,),
+            (8,),
         ]
+
+        analytics_run_history = connection.execute(
+            "SELECT to_regclass('public.analytics_run_history')"
+        ).fetchone()
 
         columns = connection.execute(
             """
@@ -85,6 +90,7 @@ def test_fresh_database_schema_and_migrations_are_idempotent(
             """
         ).fetchall()
 
+    assert analytics_run_history == ("analytics_run_history",)
     assert len(columns) == 12
 
     for table_name, column_name, is_nullable, data_type in columns:
@@ -447,11 +453,9 @@ def test_dbt_incremental_models_match_legacy_and_move_mart_date(
             database=database,
             target="build-legacy-analytics",
         )
-        run_dbt(
-            database,
-            "build",
-            "--exclude",
-            "tag:parity",
+        run_database_make_target(
+            database=database,
+            target="analytics-run",
         )
         run_dbt(
             database,
@@ -481,6 +485,20 @@ def test_dbt_incremental_models_match_legacy_and_move_mart_date(
                 """
             ).fetchall()
 
+            observed_run = connection.execute(
+                """
+                SELECT
+                    trigger_type,
+                    status,
+                    freshness_status,
+                    build_status,
+                    total_nodes
+                FROM analytics_run_history
+                ORDER BY started_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+
         assert first_dds_row is not None
         assert first_dds_row[0:2] == (
             "paid",
@@ -489,6 +507,14 @@ def test_dbt_incremental_models_match_legacy_and_move_mart_date(
         assert first_mart_rows == [
             (date(2026, 8, 2), 1),
         ]
+        assert observed_run is not None
+        assert observed_run[0:4] == (
+            "manual",
+            "success",
+            "pass",
+            "success",
+        )
+        assert observed_run[4] > 0
 
         run_dbt(
             database,

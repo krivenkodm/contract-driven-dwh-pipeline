@@ -12,6 +12,7 @@ WAIT_DELAY_SECONDS="${WAIT_DELAY_SECONDS:-1}"
 
 ORDER_ID="${ORDER_ID:-ord_e2e_$(date +%Y%m%d%H%M%S)_$$}"
 INVALID_ORDER_ID="${ORDER_ID}_invalid"
+E2E_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 if [[ ! "${ORDER_ID}" =~ ^[a-zA-Z0-9_-]+$ ]]; then
     echo "ERROR: invalid ORDER_ID: ${ORDER_ID}"
@@ -265,6 +266,25 @@ if [[ "${mart_rows_count}" -lt 1 ]]; then
 fi
 
 echo "dbt.mart_daily_orders contains ${mart_rows_count} row(s)"
+
+observed_run_count="$(
+    psql_scalar "
+        SELECT COUNT(*)
+        FROM analytics_run_history
+        WHERE trigger_type = 'manual'
+          AND status = 'success'
+          AND freshness_status = 'pass'
+          AND build_status = 'success'
+          AND started_at >= '${E2E_STARTED_AT}'::timestamptz;
+    "
+)"
+
+if [[ "${observed_run_count}" -lt 1 ]]; then
+    echo "ERROR: successful observed analytics run was not recorded"
+    exit 1
+fi
+
+echo "Observed analytics run was recorded successfully"
 
 echo
 echo "dbt DDS result:"

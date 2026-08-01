@@ -120,6 +120,7 @@ contract-driven-dwh-pipeline/
 │   ├── producer.py
 │   ├── consumer.py
 │   ├── dwh_writer.py
+│   ├── analytics_runner.py
 │   └── topic_manager.py
 │
 ├── sql/
@@ -150,6 +151,7 @@ contract-driven-dwh-pipeline/
 │   └── ci.yml
 │
 ├── docker-compose.yml
+├── Dockerfile.analytics
 ├── Makefile
 ├── requirements.txt
 ├── requirements-dbt.txt
@@ -414,6 +416,7 @@ Useful dbt-only commands:
 make dbt-parse     # validate project structure without a database
 make dbt-debug     # check the PostgreSQL connection
 make dbt-build     # build dbt models, snapshot and non-parity tests
+make dbt-source-freshness  # check the RAW load SLA
 make verify-dbt-parity  # optionally build legacy SQL and verify equivalence
 make dbt-docs      # generate the dbt catalog and documentation site
 ```
@@ -471,7 +474,56 @@ make down
 
 ---
 
-## 12. Example Mart
+## 12. Orchestration and Observability
+
+`make build-analytics` runs the observed analytics wrapper. It checks RAW
+freshness, runs `dbt build`, reads dbt artifacts, and writes one audit row to
+`analytics_run_history`.
+
+Run it manually and inspect the history:
+
+```bash
+make analytics-run
+make analytics-history
+```
+
+The default freshness SLA uses `raw_order_created.kafka_load_dttm` as a demo
+ingestion heartbeat: 15 minutes produces a warning and 60 minutes produces an
+error. Sparse payment and cancellation streams are intentionally excluded to
+avoid false alerts when no business events occur. A freshness problem is
+recorded as an analytics warning while the build still runs; use the strict
+command when an SLA violation must fail the process:
+
+```bash
+make analytics-run-strict
+```
+
+Start the Docker Compose scheduler with a five-minute interval:
+
+```bash
+make orchestration-up
+make orchestration-logs
+```
+
+Override the interval when needed:
+
+```bash
+make orchestration-up ANALYTICS_RUN_INTERVAL_SECONDS=60
+```
+
+Stop only the scheduler without stopping Kafka, PostgreSQL, or the consumer:
+
+```bash
+make orchestration-down
+```
+
+Concurrent executions are prevented by a PostgreSQL advisory lock. Set
+`ALERT_WEBHOOK_URL` before `make orchestration-up` to send a JSON notification
+when freshness warns/fails or the dbt build fails.
+
+---
+
+## 13. Example Mart
 
 ```sql
 CREATE TABLE mart_daily_order_revenue AS
@@ -488,7 +540,7 @@ GROUP BY
 
 ---
 
-## 13. Compatibility Rules
+## 14. Compatibility Rules
 
 Allowed changes:
 
@@ -524,7 +576,7 @@ compatible.
 
 ---
 
-## 14. Data Quality Checks
+## 15. Data Quality Checks
 
 The current pipeline validates required fields, types, enums and timestamp
 timezones before RAW insertion. DDS also exposes business data quality flags:
@@ -565,7 +617,7 @@ Further useful checks:
 
 ---
 
-## 15. What This Project Demonstrates
+## 16. What This Project Demonstrates
 
 This project demonstrates practical knowledge of:
 
@@ -584,26 +636,30 @@ This project demonstrates practical knowledge of:
 * analytical mart design
 * modular dbt transformations and lineage
 * dbt data tests, unit tests and snapshots
+* source freshness SLAs and dbt artifact parsing
+* scheduled, concurrency-safe analytics execution
+* persistent run history and webhook alerting
 * safe side-by-side SQL-to-dbt parity validation
 * database-backed integration and migration testing
 * automated CI with end-to-end verification
 
 ---
 
-## 16. Resume Description
+## 17. Resume Description
 
 Built a contract-driven DWH ingestion pipeline using Python, PostgreSQL,
 Kafka-compatible streaming with Redpanda, and dbt. Implemented automatic RAW
 DDL generation, event validation, dead-letter handling, idempotent ingestion,
 incremental DDS and marts, historical snapshots, parity checks, database
-integration tests, and end-to-end CI.
+integration tests, source freshness monitoring, scheduled dbt execution,
+persistent run observability, and end-to-end CI.
 
 ---
 
-## 17. Future Improvements
+## 18. Future Improvements
 
 * add Schema Registry with Avro or Protobuf serialization
-* add production orchestration for dbt runs and source freshness alerts
+* integrate a production orchestrator such as Airflow or Dagster
 * add historical DDS loading and a BI dashboard
 * retain Kafka headers and producer/schema identifiers
 

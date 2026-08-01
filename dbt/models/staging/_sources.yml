@@ -7,6 +7,15 @@ sources:
     tables:
       - name: raw_order_created
         description: All valid order_created contract versions.
+        config:
+          loaded_at_field: kafka_load_dttm
+          freshness:
+            warn_after:
+              count: 15
+              period: minute
+            error_after:
+              count: 60
+              period: minute
         columns:
           - name: raw_id
             data_tests:
