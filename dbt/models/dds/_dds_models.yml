@@ -1,0 +1,87 @@
+version: 2
+
+models:
+  - name: dds_orders
+    description: >-
+      One deterministic current lifecycle row per order. The earliest creation
+      defines order attributes; latest payment and cancellation provide event
+      details; cancellation has terminal status precedence.
+    columns:
+      - name: order_id
+        description: Business order identifier and model grain.
+        data_tests:
+          - unique
+          - not_null
+
+      - name: customer_id
+        data_tests:
+          - not_null
+
+      - name: order_amount
+        data_tests:
+          - not_null
+
+      - name: currency
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [RUB, USD, EUR]
+
+      - name: created_at
+        data_tests:
+          - not_null
+
+      - name: status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [created, paid, cancelled]
+
+      - name: payments_cnt
+        data_tests:
+          - not_null
+
+      - name: cancellations_cnt
+        data_tests:
+          - not_null
+
+      - name: duplicate_created_events_cnt
+        data_tests:
+          - not_null
+
+      - name: max_created_raw_id
+        description: Incremental high-watermark contribution for created events.
+        data_tests:
+          - not_null
+
+      - name: max_paid_raw_id
+        description: Incremental high-watermark contribution for payment events.
+        data_tests:
+          - not_null
+
+      - name: max_cancelled_raw_id
+        description: Incremental high-watermark contribution for cancellation events.
+        data_tests:
+          - not_null
+
+      - name: processed_dttm
+        data_tests:
+          - not_null
+
+  - name: dq_orphan_order_events
+    description: Payments and cancellations without a matching creation event.
+    columns:
+      - name: order_id
+        data_tests:
+          - unique
+          - not_null
+
+      - name: first_event_at
+        data_tests:
+          - not_null
+
+      - name: last_event_at
+        data_tests:
+          - not_null

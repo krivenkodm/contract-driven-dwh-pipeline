@@ -5,7 +5,7 @@ Demo project showing how **data contracts** can drive a DWH ingestion pipeline f
 The project uses **Redpanda** as a lightweight Kafka-compatible broker for local development.
 
 ```text
-Data Contract → Kafka-compatible Topic → Event Validation → Raw DWH → DDS → Mart
+Data Contract → Kafka-compatible Topic → Validation → RAW → dbt → DDS → Mart
 ```
 
 ---
@@ -65,17 +65,23 @@ The pipeline uses this contract to:
          ├── invalid events ──> Dead Letter Table
          │
          v
-┌─────────────────┐
-│ Raw DWH Layer   │
-└────────┬────────┘
-         v
-┌─────────────────┐
-│ DDS Layer       │
-└────────┬────────┘
-         v
-┌─────────────────┐
-│ Mart Layer      │
-└─────────────────┘
+┌─────────────────────┐
+│ Raw DWH Layer       │
+└──────────┬──────────┘
+           v
+┌─────────────────────┐
+│ dbt staging +       │
+│ intermediate models │
+└──────────┬──────────┘
+           v
+┌─────────────────────┐
+│ Incremental DDS +   │
+│ order history       │
+└──────────┬──────────┘
+           v
+┌─────────────────────┐
+│ Incremental Mart    │
+└─────────────────────┘
 ```
 
 ---
@@ -88,6 +94,7 @@ The pipeline uses this contract to:
 * YAML data contracts
 * Docker Compose
 * pytest
+* dbt Core with the PostgreSQL adapter
 * GitHub Actions
 * Makefile
 
@@ -122,6 +129,15 @@ contract-driven-dwh-pipeline/
 │   ├── migrations/
 │   └── tests/
 │
+├── dbt/
+│   ├── models/
+│   │   ├── staging/
+│   │   ├── intermediate/
+│   │   ├── dds/
+│   │   └── marts/
+│   ├── snapshots/
+│   └── tests/
+│
 ├── scripts/
 │   ├── migrate.sh
 │   └── e2e_smoke.sh
@@ -136,6 +152,7 @@ contract-driven-dwh-pipeline/
 ├── docker-compose.yml
 ├── Makefile
 ├── requirements.txt
+├── requirements-dbt.txt
 └── README.md
 ```
 
@@ -274,6 +291,11 @@ Example:
 dds_orders
 ```
 
+The dbt implementation builds this entity incrementally in the `dbt` schema.
+New RAW identity values determine the affected orders, while the complete event
+history for those orders is recalculated. This preserves late-arriving event
+handling without rebuilding every order.
+
 Possible fields:
 
 ```text
@@ -309,10 +331,15 @@ paid_revenue
 orders_with_dq_cnt
 ```
 
-Incremental mart loading is driven by `dds_orders_changes`. Each DDS upsert
-records both `old_order_dt` and `new_order_dt`. The mart deletes every affected
-date before rebuilding it, so a late event that moves the order to another day
-cannot leave a stale aggregate behind.
+During the rollout, `make build-analytics` builds both implementations:
+
+* the original SQL tables in the `public` schema;
+* the dbt models in the `dbt` schema.
+
+Three parity tests compare DDS, orphan-event DQ and MART business columns in
+both directions. The dbt mart gets affected old and new dates from the
+`dds_orders_history` snapshot, so a late event that moves an order to another
+day cannot leave a stale aggregate behind.
 
 ---
 
@@ -361,7 +388,7 @@ Create a virtual environment and install dependencies:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r requirements-dbt.txt
 ```
 
 Bootstrap infrastructure, topics and database objects:
@@ -376,10 +403,20 @@ Produce a set of demo events:
 make demo
 ```
 
-Build the incremental DDS and mart layers:
+Build the legacy and dbt incremental analytics layers and verify parity:
 
 ```bash
 make build-analytics
+```
+
+Useful dbt-only commands:
+
+```bash
+make dbt-parse     # validate project structure without a database
+make dbt-debug     # check the PostgreSQL connection
+make dbt-build     # build dbt models, snapshot and non-parity tests
+make dbt-parity    # compare dbt results with the legacy SQL tables
+make dbt-docs      # generate the dbt catalog and documentation site
 ```
 
 Run the end-to-end smoke test against the running stack:
@@ -409,10 +446,11 @@ Run the same complete sequence used by CI:
 make ci
 ```
 
-The CI workflow validates contracts, runs unit tests, tests fresh and populated
-database migrations, starts the full Redpanda/PostgreSQL stack, and executes the
-RAW → DDS → MART smoke test. Docker status and logs are uploaded as an artifact
-when a job fails.
+The CI workflow validates contracts, parses the dbt project, runs Python unit
+tests, tests fresh and populated database migrations, exercises dbt
+incrementality and parity, starts the full Redpanda/PostgreSQL stack, and
+executes the RAW → DDS → MART smoke test. Docker status and logs are uploaded
+as an artifact when a job fails.
 
 Inspect the result:
 
@@ -545,6 +583,9 @@ This project demonstrates practical knowledge of:
 * idempotent loading
 * data quality checks
 * analytical mart design
+* modular dbt transformations and lineage
+* dbt data tests, unit tests and snapshots
+* safe side-by-side SQL-to-dbt parity validation
 * database-backed integration and migration testing
 * automated CI with end-to-end verification
 
@@ -552,14 +593,18 @@ This project demonstrates practical knowledge of:
 
 ## 16. Resume Description
 
-Built a contract-driven DWH ingestion pipeline using Python, PostgreSQL and Kafka-compatible streaming with Redpanda. Implemented automatic raw DWH DDL generation, event validation, dead-letter handling, idempotent ingestion, analytical marts, database integration tests and end-to-end CI.
+Built a contract-driven DWH ingestion pipeline using Python, PostgreSQL,
+Kafka-compatible streaming with Redpanda, and dbt. Implemented automatic RAW
+DDL generation, event validation, dead-letter handling, idempotent ingestion,
+incremental DDS and marts, historical snapshots, parity checks, database
+integration tests, and end-to-end CI.
 
 ---
 
 ## 17. Future Improvements
 
 * add Schema Registry with Avro or Protobuf serialization
-* move transformations to dbt and add orchestration
+* add production orchestration for dbt runs and source freshness alerts
 * add historical DDS loading and a BI dashboard
 * retain Kafka headers and producer/schema identifiers
 

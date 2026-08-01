@@ -266,6 +266,34 @@ fi
 
 echo "mart_daily_orders contains ${mart_rows_count} row(s)"
 
+dbt_dds_rows_count="$(
+    psql_scalar "
+        SELECT COUNT(*)
+        FROM dbt.dds_orders
+        WHERE order_id = '${ORDER_ID}'
+          AND status = 'paid';
+    "
+)"
+
+if [[ "${dbt_dds_rows_count}" -ne 1 ]]; then
+    echo "ERROR: ${ORDER_ID} has unexpected dbt DDS state"
+    exit 1
+fi
+
+dbt_mart_rows_count="$(
+    psql_scalar "
+        SELECT COUNT(*)
+        FROM dbt.mart_daily_orders;
+    "
+)"
+
+if [[ "${dbt_mart_rows_count}" -lt 1 ]]; then
+    echo "ERROR: dbt.mart_daily_orders is empty"
+    exit 1
+fi
+
+echo "dbt DDS and MART contain the expected result"
+
 echo
 echo "DDS result:"
 
@@ -292,6 +320,21 @@ docker exec -i "${POSTGRES_CONTAINER}" \
     -c "
         SELECT *
         FROM mart_daily_orders
+        ORDER BY 1 DESC
+        LIMIT 5;
+    "
+
+echo
+echo "dbt MART result:"
+
+docker exec -i "${POSTGRES_CONTAINER}" \
+    psql \
+    -U "${POSTGRES_USER}" \
+    -d "${POSTGRES_DB}" \
+    -v ON_ERROR_STOP=1 \
+    -c "
+        SELECT *
+        FROM dbt.mart_daily_orders
         ORDER BY 1 DESC
         LIMIT 5;
     "

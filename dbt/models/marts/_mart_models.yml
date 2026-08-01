@@ -1,0 +1,43 @@
+version: 2
+
+models:
+  - name: mart_daily_orders
+    description: Daily order lifecycle and data-quality aggregates.
+    columns:
+      - name: order_dt
+        description: Calendar date of the selected creation event.
+        data_tests:
+          - unique
+          - not_null
+
+      - name: created_orders_cnt
+        data_tests:
+          - not_null
+
+      - name: paid_orders_cnt
+        data_tests:
+          - not_null
+
+      - name: cancelled_orders_cnt
+        data_tests:
+          - not_null
+
+      - name: created_status_orders_cnt
+        data_tests:
+          - not_null
+
+      - name: gross_order_amount
+        data_tests:
+          - not_null
+
+      - name: paid_revenue
+        data_tests:
+          - not_null
+
+      - name: orders_with_dq_cnt
+        data_tests:
+          - not_null
+
+      - name: processed_dttm
+        data_tests:
+          - not_null

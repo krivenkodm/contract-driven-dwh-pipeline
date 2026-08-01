@@ -1,0 +1,34 @@
+name: contract_driven_dwh
+version: "1.0.0"
+config-version: 2
+
+profile: contract_driven_dwh
+
+model-paths:
+  - models
+snapshot-paths:
+  - snapshots
+test-paths:
+  - tests
+macro-paths:
+  - macros
+
+target-path: target
+clean-targets:
+  - target
+  - dbt_packages
+
+models:
+  contract_driven_dwh:
+    staging:
+      +materialized: view
+    intermediate:
+      +materialized: ephemeral
+    dds:
+      +materialized: incremental
+    marts:
+      +materialized: incremental
+
+snapshots:
+  contract_driven_dwh:
+    +target_schema: dbt

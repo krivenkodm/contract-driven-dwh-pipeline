@@ -1,0 +1,62 @@
+version: 2
+
+sources:
+  - name: raw_events
+    description: Validated event payloads loaded by the Kafka consumer.
+    schema: public
+    tables:
+      - name: raw_order_created
+        description: All valid order_created contract versions.
+        columns:
+          - name: raw_id
+            data_tests:
+              - unique
+              - not_null
+          - name: order_id
+            data_tests:
+              - not_null
+          - name: kafka_load_dttm
+            data_tests:
+              - not_null
+
+      - name: raw_order_paid
+        description: Valid order_paid events.
+        columns:
+          - name: raw_id
+            data_tests:
+              - unique
+              - not_null
+          - name: order_id
+            data_tests:
+              - not_null
+          - name: payment_id
+            data_tests:
+              - not_null
+          - name: kafka_load_dttm
+            data_tests:
+              - not_null
+
+      - name: raw_order_cancelled
+        description: Valid order_cancelled events.
+        columns:
+          - name: raw_id
+            data_tests:
+              - unique
+              - not_null
+          - name: order_id
+            data_tests:
+              - not_null
+          - name: cancellation_id
+            data_tests:
+              - not_null
+          - name: kafka_load_dttm
+            data_tests:
+              - not_null
+
+  - name: legacy_analytics
+    description: Legacy SQL-built tables retained during dbt parity rollout.
+    schema: public
+    tables:
+      - name: dds_orders
+      - name: dq_orphan_order_events
+      - name: mart_daily_orders

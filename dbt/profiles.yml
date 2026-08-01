@@ -1,0 +1,13 @@
+contract_driven_dwh:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('DBT_HOST', 'localhost') }}"
+      port: "{{ env_var('DBT_PORT', '55432') | int }}"
+      user: "{{ env_var('DBT_USER', 'dwh') }}"
+      password: "{{ env_var('DBT_PASSWORD', 'dwh') }}"
+      dbname: "{{ env_var('DBT_DATABASE', 'dwh') }}"
+      schema: "{{ env_var('DBT_SCHEMA', 'dbt') }}"
+      threads: 4
+      connect_timeout: 10

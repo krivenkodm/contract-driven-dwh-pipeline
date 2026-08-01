@@ -5,3 +5,6 @@ __pycache__/
 .env
 .DS_Store
 ci-artifacts/
+dbt/logs/
+dbt/target/
+dbt/dbt_packages/

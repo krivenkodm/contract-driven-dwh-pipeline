@@ -1,0 +1,4 @@
+-r requirements.txt
+
+dbt-core>=1.12,<1.13
+dbt-postgres>=1.11,<1.12

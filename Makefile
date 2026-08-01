@@ -1,4 +1,7 @@
 PYTHON := .venv/bin/python
+DBT := .venv/bin/dbt
+DBT_PROJECT_DIR := dbt
+DBT_PROFILES_DIR := dbt
 
 EVENT ?= order_created
 ORDER_ID ?= ord_1001
@@ -37,7 +40,13 @@ INTEGRATION_POSTGRES_ADMIN_DSN ?= \
 	consume-once \
 	build-dds \
 	build-mart \
+	build-legacy-analytics \
 	build-analytics \
+	dbt-debug \
+	dbt-parse \
+	dbt-build \
+	dbt-parity \
+	dbt-docs \
 	rebuild-from-kafka \
 	test \
 	test-unit \
@@ -222,9 +231,51 @@ build-mart: migrate
 		< sql/mart/daily_orders.sql
 
 
-build-analytics:
+build-legacy-analytics:
 	$(MAKE) build-dds
 	$(MAKE) build-mart
+
+
+dbt-debug: postgres-up
+	DBT_DATABASE=$(POSTGRES_DB) \
+	$(DBT) debug \
+		--project-dir $(DBT_PROJECT_DIR) \
+		--profiles-dir $(DBT_PROFILES_DIR)
+
+
+dbt-parse:
+	$(DBT) parse \
+		--project-dir $(DBT_PROJECT_DIR) \
+		--profiles-dir $(DBT_PROFILES_DIR)
+
+
+dbt-build: migrate
+	DBT_DATABASE=$(POSTGRES_DB) \
+	$(DBT) build \
+		--project-dir $(DBT_PROJECT_DIR) \
+		--profiles-dir $(DBT_PROFILES_DIR) \
+		--exclude tag:parity
+
+
+dbt-parity:
+	DBT_DATABASE=$(POSTGRES_DB) \
+	$(DBT) test \
+		--project-dir $(DBT_PROJECT_DIR) \
+		--profiles-dir $(DBT_PROFILES_DIR) \
+		--select tag:parity
+
+
+dbt-docs: postgres-up
+	DBT_DATABASE=$(POSTGRES_DB) \
+	$(DBT) docs generate \
+		--project-dir $(DBT_PROJECT_DIR) \
+		--profiles-dir $(DBT_PROFILES_DIR)
+
+
+build-analytics:
+	$(MAKE) build-legacy-analytics
+	$(MAKE) dbt-build
+	$(MAKE) dbt-parity
 
 
 rebuild-from-kafka:
@@ -232,7 +283,7 @@ rebuild-from-kafka:
 	echo "Stopping permanent consumer"; \
 	docker compose stop consumer; \
 	trap 'docker compose start consumer >/dev/null' EXIT; \
-	echo "Truncating DWH tables"; \
+	echo "Truncating DWH tables and dbt schema"; \
 	docker exec -i $(POSTGRES_CONTAINER) \
 		psql \
 		-U $(POSTGRES_USER) \
@@ -251,7 +302,8 @@ rebuild-from-kafka:
 			dead_letter_events \
 			RESTART IDENTITY; \
 			ALTER SEQUENCE dds_orders_change_id_seq \
-			RESTART WITH 1;"; \
+			RESTART WITH 1; \
+			DROP SCHEMA IF EXISTS dbt CASCADE;"; \
 	echo "Replaying Kafka topics"; \
 	CONSUMER_GROUP_ID=contract-dwh-replay-$$(date +%s) \
 	KAFKA_BOOTSTRAP_SERVERS=localhost:19092 \

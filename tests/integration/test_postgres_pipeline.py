@@ -1,4 +1,5 @@
 import json
+from datetime import date
 from pathlib import Path
 
 import psycopg
@@ -11,6 +12,7 @@ from dwh_writer import DwhWriter
 from tests.integration.db_support import (
     DatabaseFactory,
     IntegrationDatabase,
+    run_dbt,
     run_database_make_target,
 )
 
@@ -380,3 +382,240 @@ def test_populated_legacy_schema_is_backfilled(
         2,
     )
     assert json.loads(dlq_row[2]) == legacy_payload
+
+
+def test_dbt_incremental_models_match_legacy_and_move_mart_date(
+    database_factory: DatabaseFactory,
+) -> None:
+    database = database_factory()
+    run_database_make_target(
+        database=database,
+        target="init-db",
+    )
+
+    contracts = load_contracts(CONTRACTS_DIR)
+    created_contract = get_contract(
+        contracts=contracts,
+        name="order_created",
+        version=2,
+    )
+    paid_contract = get_contract(
+        contracts=contracts,
+        name="order_paid",
+        version=1,
+    )
+    cancelled_contract = get_contract(
+        contracts=contracts,
+        name="order_cancelled",
+        version=1,
+    )
+
+    order_id = "ord_dbt_incremental"
+    writer = DwhWriter(database.dsn)
+
+    try:
+        assert writer.write_valid_event(
+            contract=created_contract,
+            event={
+                "order_id": order_id,
+                "customer_id": "customer_original",
+                "amount": 1200.00,
+                "currency": "RUB",
+                "created_at": "2026-08-02T10:00:00Z",
+                "source_channel": "web",
+            },
+            kafka_topic=created_contract["topic"],
+            kafka_partition=0,
+            kafka_offset=300,
+        ) is True
+
+        assert writer.write_valid_event(
+            contract=paid_contract,
+            event={
+                "order_id": order_id,
+                "payment_id": "payment_dbt_incremental",
+                "paid_amount": 1200.00,
+                "currency": "RUB",
+                "paid_at": "2026-08-02T11:00:00Z",
+            },
+            kafka_topic=paid_contract["topic"],
+            kafka_partition=0,
+            kafka_offset=301,
+        ) is True
+
+        run_database_make_target(
+            database=database,
+            target="build-legacy-analytics",
+        )
+        run_dbt(
+            database,
+            "build",
+            "--exclude",
+            "tag:parity",
+        )
+        run_dbt(
+            database,
+            "test",
+            "--select",
+            "tag:parity",
+        )
+
+        with psycopg.connect(database.dsn) as connection:
+            first_dds_row = connection.execute(
+                """
+                SELECT
+                    status,
+                    created_at::date,
+                    processed_dttm
+                FROM dbt.dds_orders
+                WHERE order_id = %s
+                """,
+                (order_id,),
+            ).fetchone()
+
+            first_mart_rows = connection.execute(
+                """
+                SELECT order_dt, paid_orders_cnt
+                FROM dbt.mart_daily_orders
+                ORDER BY order_dt
+                """
+            ).fetchall()
+
+        assert first_dds_row is not None
+        assert first_dds_row[0:2] == (
+            "paid",
+            date(2026, 8, 2),
+        )
+        assert first_mart_rows == [
+            (date(2026, 8, 2), 1),
+        ]
+
+        run_dbt(
+            database,
+            "build",
+            "--exclude",
+            "tag:parity",
+        )
+
+        with psycopg.connect(database.dsn) as connection:
+            unchanged_processed_dttm = connection.execute(
+                """
+                SELECT processed_dttm
+                FROM dbt.dds_orders
+                WHERE order_id = %s
+                """,
+                (order_id,),
+            ).fetchone()
+
+            unchanged_history_rows = connection.execute(
+                """
+                SELECT count(*)
+                FROM dbt.dds_orders_history
+                WHERE order_id = %s
+                """,
+                (order_id,),
+            ).fetchone()
+
+        assert unchanged_processed_dttm == (first_dds_row[2],)
+        assert unchanged_history_rows == (1,)
+
+        assert writer.write_valid_event(
+            contract=created_contract,
+            event={
+                "order_id": order_id,
+                "customer_id": "customer_late_arrival",
+                "amount": 1100.00,
+                "currency": "RUB",
+                "created_at": "2026-08-01T12:00:00Z",
+                "source_channel": "mobile_app",
+            },
+            kafka_topic=created_contract["topic"],
+            kafka_partition=0,
+            kafka_offset=302,
+        ) is True
+
+        assert writer.write_valid_event(
+            contract=cancelled_contract,
+            event={
+                "order_id": order_id,
+                "cancellation_id": "cancel_dbt_incremental",
+                "cancellation_reason": "customer_request",
+                "cancelled_at": "2026-08-01T12:30:00Z",
+            },
+            kafka_topic=cancelled_contract["topic"],
+            kafka_partition=0,
+            kafka_offset=303,
+        ) is True
+
+        run_database_make_target(
+            database=database,
+            target="build-legacy-analytics",
+        )
+        run_dbt(
+            database,
+            "build",
+            "--exclude",
+            "tag:parity",
+        )
+        run_dbt(
+            database,
+            "test",
+            "--select",
+            "tag:parity",
+        )
+
+        with psycopg.connect(database.dsn) as connection:
+            moved_dds_row = connection.execute(
+                """
+                SELECT
+                    customer_id,
+                    order_amount,
+                    created_at::date,
+                    status,
+                    duplicate_created_events_cnt,
+                    dq_payment_after_cancellation_flg
+                FROM dbt.dds_orders
+                WHERE order_id = %s
+                """,
+                (order_id,),
+            ).fetchone()
+
+            moved_mart_rows = connection.execute(
+                """
+                SELECT
+                    order_dt,
+                    created_orders_cnt,
+                    cancelled_orders_cnt,
+                    orders_with_dq_cnt
+                FROM dbt.mart_daily_orders
+                ORDER BY order_dt
+                """
+            ).fetchall()
+
+            history_state = connection.execute(
+                """
+                SELECT
+                    count(*),
+                    count(*) FILTER (WHERE dbt_valid_to IS NULL)
+                FROM dbt.dds_orders_history
+                WHERE order_id = %s
+                """,
+                (order_id,),
+            ).fetchone()
+
+        assert moved_dds_row is not None
+        assert moved_dds_row[0] == "customer_late_arrival"
+        assert float(moved_dds_row[1]) == 1100.00
+        assert moved_dds_row[2:] == (
+            date(2026, 8, 1),
+            "cancelled",
+            1,
+            True,
+        )
+        assert moved_mart_rows == [
+            (date(2026, 8, 1), 1, 1, 1),
+        ]
+        assert history_state == (2, 1)
+
+    finally:
+        writer.close()

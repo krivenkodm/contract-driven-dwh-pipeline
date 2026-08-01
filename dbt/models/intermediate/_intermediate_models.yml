@@ -1,0 +1,86 @@
+version: 2
+
+models:
+  - name: int_orders_enriched
+    description: Deterministic order lifecycle logic before DDS materialization.
+
+unit_tests:
+  - name: test_order_lifecycle_precedence_and_dq_flags
+    description: >-
+      The earliest creation wins, the latest payment is selected, cancellation
+      is terminal, and all event-history DQ flags are retained.
+    model: int_orders_enriched
+    given:
+      - input: ref('stg_order_created')
+        rows:
+          - raw_id: 1
+            order_id: order_1
+            customer_id: customer_first
+            source_channel: web
+            amount: 100.00
+            currency: RUB
+            created_at: "2026-08-01T12:00:00+00:00"
+            kafka_load_dttm: "2026-08-01T12:00:01+00:00"
+            kafka_partition: 0
+            kafka_offset: 1
+          - raw_id: 2
+            order_id: order_1
+            customer_id: customer_duplicate
+            source_channel: mobile
+            amount: 200.00
+            currency: USD
+            created_at: "2026-08-01T12:01:00+00:00"
+            kafka_load_dttm: "2026-08-01T12:01:01+00:00"
+            kafka_partition: 0
+            kafka_offset: 2
+
+      - input: ref('stg_order_paid')
+        rows:
+          - raw_id: 1
+            order_id: order_1
+            payment_id: payment_early
+            paid_amount: 90.00
+            currency: USD
+            paid_at: "2026-08-01T11:59:00+00:00"
+            kafka_load_dttm: "2026-08-01T12:02:00+00:00"
+            kafka_partition: 0
+            kafka_offset: 1
+          - raw_id: 2
+            order_id: order_1
+            payment_id: payment_latest
+            paid_amount: 100.00
+            currency: RUB
+            paid_at: "2026-08-01T12:10:00+00:00"
+            kafka_load_dttm: "2026-08-01T12:10:01+00:00"
+            kafka_partition: 0
+            kafka_offset: 2
+
+      - input: ref('stg_order_cancelled')
+        rows:
+          - raw_id: 1
+            order_id: order_1
+            cancellation_id: cancellation_1
+            cancellation_reason: customer_request
+            cancelled_at: "2026-08-01T12:05:00+00:00"
+            kafka_load_dttm: "2026-08-01T12:05:01+00:00"
+            kafka_partition: 0
+            kafka_offset: 1
+
+    expect:
+      rows:
+        - order_id: order_1
+          customer_id: customer_first
+          order_amount: 100.00
+          currency: RUB
+          status: cancelled
+          payment_id: payment_latest
+          payments_cnt: 2
+          cancellations_cnt: 1
+          duplicate_created_events_cnt: 1
+          dq_multiple_payments_flg: true
+          dq_multiple_cancellations_flg: false
+          dq_payment_amount_mismatch_flg: true
+          dq_payment_currency_mismatch_flg: true
+          dq_payment_before_creation_flg: true
+          dq_cancellation_before_creation_flg: false
+          dq_payment_after_cancellation_flg: true
