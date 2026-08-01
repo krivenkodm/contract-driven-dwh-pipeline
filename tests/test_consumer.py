@@ -1,6 +1,11 @@
+from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 import pytest
+from confluent_kafka.schema_registry.error import (
+    SchemaRegistryError,
+)
 
 import consumer
 from consumer import parse_message, process_message
@@ -126,3 +131,78 @@ def test_tombstone_is_saved_with_null_raw_payload() -> None:
     assert len(writer.dead_letters) == 1
     assert writer.dead_letters[0]["raw_payload"] is None
     assert writer.dead_letters[0]["payload"] is None
+
+
+def test_avro_payload_is_decoded_and_normalized() -> None:
+    class FakeAvroDeserializer:
+        def __call__(self, _: bytes, __: Any) -> object:
+            return {
+                "event_id": "event_1",
+                "amount": Decimal("10.20"),
+                "created_at": datetime(
+                    2026,
+                    8,
+                    1,
+                    12,
+                    tzinfo=timezone.utc,
+                ),
+            }
+
+    payload, errors = parse_message(
+        FakeMessage(b"\x00\x00\x00\x00\x01\x02"),  # type: ignore[arg-type]
+        avro_deserializer=FakeAvroDeserializer(),
+    )
+
+    assert errors == []
+    assert payload is not None
+    assert payload["event_id"] == "event_1"
+    assert payload["amount"] == Decimal("10.20")
+    assert payload["created_at"] == (
+        "2026-08-01T12:00:00+00:00"
+    )
+
+
+def test_avro_payload_without_registry_is_rejected() -> None:
+    payload, errors = parse_message(
+        FakeMessage(b"\x00\x00\x00\x00\x01\x02")  # type: ignore[arg-type]
+    )
+
+    assert payload is None
+    assert errors == [
+        "Avro payload received but Schema Registry is not configured"
+    ]
+
+
+def test_corrupt_avro_is_rejected() -> None:
+    class FailingAvroDeserializer:
+        def __call__(self, _: bytes, __: Any) -> object:
+            raise ValueError("unknown schema id")
+
+    payload, errors = parse_message(
+        FakeMessage(b"\x00\x7f\xff\xff\xff\x00"),  # type: ignore[arg-type]
+        avro_deserializer=FailingAvroDeserializer(),
+    )
+
+    assert payload is None
+    assert len(errors) == 1
+    assert "not valid Avro" in errors[0]
+    assert "unknown schema id" in errors[0]
+
+
+def test_registry_outage_is_not_committed_to_dlq() -> None:
+    class UnavailableAvroDeserializer:
+        def __call__(self, _: bytes, __: Any) -> object:
+            raise SchemaRegistryError(
+                503,
+                50001,
+                "registry unavailable",
+            )
+
+    with pytest.raises(
+        SchemaRegistryError,
+        match="registry unavailable",
+    ):
+        parse_message(
+            FakeMessage(b"\x00\x00\x00\x00\x01\x02"),  # type: ignore[arg-type]
+            avro_deserializer=UnavailableAvroDeserializer(),
+        )

@@ -1,0 +1,52 @@
+{
+  "type": "record",
+  "name": "order_created",
+  "namespace": "io.contract_dwh.events",
+  "doc": "Generated from order_created contract v2; owner=orders-team",
+  "fields": [
+    {
+      "name": "order_id",
+      "type": "string"
+    },
+    {
+      "name": "customer_id",
+      "type": "string"
+    },
+    {
+      "name": "amount",
+      "type": {
+        "type": "bytes",
+        "logicalType": "decimal",
+        "precision": 12,
+        "scale": 2
+      }
+    },
+    {
+      "name": "currency",
+      "type": {
+        "type": "enum",
+        "name": "currency_enum",
+        "symbols": [
+          "RUB",
+          "USD",
+          "EUR"
+        ]
+      }
+    },
+    {
+      "name": "created_at",
+      "type": {
+        "type": "long",
+        "logicalType": "timestamp-micros"
+      }
+    },
+    {
+      "name": "source_channel",
+      "type": [
+        "null",
+        "string"
+      ],
+      "default": null
+    }
+  ]
+}

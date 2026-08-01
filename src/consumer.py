@@ -3,7 +3,7 @@ import json
 import os
 import time
 from json import JSONDecodeError
-from typing import Any
+from typing import Any, Protocol
 
 from confluent_kafka import (
     Consumer,
@@ -11,14 +11,45 @@ from confluent_kafka import (
     Message,
     TopicPartition,
 )
+from confluent_kafka.serialization import (
+    MessageField,
+    SerializationContext,
+)
+from confluent_kafka.schema_registry.error import (
+    SchemaRegistryError,
+)
 from dotenv import load_dotenv
+from httpx import TransportError
 
+from avro_codec import (
+    create_avro_deserializer,
+    is_confluent_avro,
+)
+from avro_schema import normalize_avro_event
 from contract_registry import (
     load_contracts,
     map_contracts_by_topic,
 )
 from dwh_writer import DwhWriter
 from validator import validate_event
+
+
+class AvroDeserializerProtocol(Protocol):
+    def __call__(
+        self,
+        data: bytes,
+        ctx: Any,
+    ) -> object: ...
+
+
+def _is_registry_availability_error(error: Exception) -> bool:
+    if isinstance(error, TransportError):
+        return True
+
+    if not isinstance(error, SchemaRegistryError):
+        return False
+
+    return error.http_status_code != 404
 
 
 def reject_non_standard_json_constant(value: str) -> None:
@@ -45,11 +76,43 @@ def log_partition_assignment(
 
 def parse_message(
     message: Message,
+    avro_deserializer: AvroDeserializerProtocol | None = None,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     message_value = message.value()
 
     if message_value is None:
         return None, ["Message payload must not be null"]
+
+    if is_confluent_avro(message_value):
+        if avro_deserializer is None:
+            return None, [
+                "Avro payload received but Schema Registry "
+                "is not configured"
+            ]
+
+        try:
+            payload = avro_deserializer(
+                message_value,
+                SerializationContext(
+                    message.topic(),
+                    MessageField.VALUE,
+                ),
+            )
+        except Exception as error:
+            if _is_registry_availability_error(error):
+                raise
+
+            return None, [
+                "Message is not valid Avro: "
+                f"{type(error).__name__}: {error}"
+            ]
+
+        if not isinstance(payload, dict):
+            return None, [
+                "Avro message payload must be a record"
+            ]
+
+        return normalize_avro_event(payload), []
 
     try:
         raw_value = message_value.decode("utf-8")
@@ -77,8 +140,12 @@ def process_message(
     message: Message,
     contract: dict[str, Any],
     writer: DwhWriter,
+    avro_deserializer: AvroDeserializerProtocol | None = None,
 ) -> None:
-    payload, parsing_errors = parse_message(message)
+    payload, parsing_errors = parse_message(
+        message,
+        avro_deserializer=avro_deserializer,
+    )
 
     errors = list(parsing_errors)
 
@@ -180,6 +247,16 @@ def main() -> None:
         contracts
     )
 
+    schema_registry_url = os.getenv(
+        "SCHEMA_REGISTRY_URL",
+        "",
+    ).strip()
+    avro_deserializer = (
+        create_avro_deserializer(schema_registry_url)
+        if schema_registry_url
+        else None
+    )
+
     topics = sorted(contracts_by_topic)
 
     consumer = Consumer(
@@ -215,6 +292,8 @@ def main() -> None:
     print(
         "Consumer started. Topics: "
         f"{', '.join(topics)}. "
+        "Formats: JSON"
+        f"{' and Avro' if avro_deserializer else ''}. "
         "Press Ctrl+C to stop."
     )
 
@@ -271,6 +350,7 @@ def main() -> None:
                 message=message,
                 contract=contract,
                 writer=writer,
+                avro_deserializer=avro_deserializer,
             )
 
             consumer.commit(

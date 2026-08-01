@@ -1,0 +1,44 @@
+{
+  "type": "record",
+  "name": "order_paid",
+  "namespace": "io.contract_dwh.events",
+  "doc": "Generated from order_paid contract v1; owner=payments-team",
+  "fields": [
+    {
+      "name": "order_id",
+      "type": "string"
+    },
+    {
+      "name": "payment_id",
+      "type": "string"
+    },
+    {
+      "name": "paid_amount",
+      "type": {
+        "type": "bytes",
+        "logicalType": "decimal",
+        "precision": 12,
+        "scale": 2
+      }
+    },
+    {
+      "name": "currency",
+      "type": {
+        "type": "enum",
+        "name": "currency_enum",
+        "symbols": [
+          "RUB",
+          "USD",
+          "EUR"
+        ]
+      }
+    },
+    {
+      "name": "paid_at",
+      "type": {
+        "type": "long",
+        "logicalType": "timestamp-micros"
+      }
+    }
+  ]
+}
