@@ -12,7 +12,7 @@ from contract_registry import load_contracts
 
 TYPE_MAPPING = {
     "string": "varchar",
-    "timestamp": "timestamp",
+    "timestamp": "timestamptz",
 }
 
 DECIMAL_PATTERN = re.compile(
@@ -121,7 +121,7 @@ def generate_raw_ddl(
         "kafka_topic varchar NOT NULL",
         "kafka_partition integer NOT NULL",
         "kafka_offset bigint NOT NULL",
-        "kafka_load_dttm timestamp NOT NULL",
+        "kafka_load_dttm timestamptz NOT NULL",
     ]
 
     for field in contract["schema"]["fields"]:

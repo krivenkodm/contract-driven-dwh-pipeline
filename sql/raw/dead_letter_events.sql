@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS dead_letter_events (
     kafka_offset        bigint NOT NULL,
     event_payload       jsonb,
     error_message       text NOT NULL,
-    load_dttm           timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    load_dttm           timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT uq_dead_letter_kafka_message
         UNIQUE (

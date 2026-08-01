@@ -131,3 +131,30 @@ def test_generated_ddl_contains_unique_kafka_key() -> None:
     assert "kafka_topic" in ddl
     assert "kafka_partition" in ddl
     assert "kafka_offset" in ddl
+
+
+def test_generated_ddl_uses_timezone_aware_timestamps() -> None:
+    subprocess.run(
+        [
+            str(PYTHON),
+            "src/ddl_generator.py",
+        ],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    ddl_files = (
+        PROJECT_ROOT
+        / "sql"
+        / "raw"
+    ).glob("generated_*.sql")
+
+    for ddl_file in ddl_files:
+        ddl = ddl_file.read_text(
+            encoding="utf-8"
+        ).lower()
+
+        assert "timestamptz" in ddl
+        assert " timestamp " not in ddl

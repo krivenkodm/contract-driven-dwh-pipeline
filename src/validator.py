@@ -12,7 +12,10 @@ def _validate_decimal(
     contract_type: str,
     field_name: str,
 ) -> list[str]:
-    if isinstance(value, bool):
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float, Decimal))
+    ):
         return [f"Field '{field_name}' must be decimal"]
 
     try:
@@ -28,16 +31,31 @@ def _validate_decimal(
     precision = int(match.group(1))
     allowed_scale = int(match.group(2))
 
+    if allowed_scale > precision:
+        return [f"Unsupported decimal type '{contract_type}'"]
+
+    if not decimal_value.is_finite():
+        return [f"Field '{field_name}' must be a finite decimal"]
+
     _, digits, exponent = decimal_value.as_tuple()
 
     actual_scale = max(-exponent, 0)
-    actual_precision = len(digits)
+    integer_digits = max(
+        len(digits) + exponent,
+        0,
+    )
+
+    if decimal_value == 0:
+        integer_digits = 1
+
+    allowed_integer_digits = precision - allowed_scale
 
     errors: list[str] = []
 
-    if actual_precision > precision:
+    if integer_digits > allowed_integer_digits:
         errors.append(
-            f"Field '{field_name}' exceeds precision {precision}"
+            f"Field '{field_name}' exceeds "
+            f"{allowed_integer_digits} integer digits"
         )
 
     if actual_scale > allowed_scale:
@@ -53,9 +71,19 @@ def _validate_timestamp(value: Any, field_name: str) -> list[str]:
         return [f"Field '{field_name}' must be an ISO timestamp string"]
 
     try:
-        datetime.fromisoformat(value.replace("Z", "+00:00"))
+        timestamp = datetime.fromisoformat(
+            value.replace("Z", "+00:00")
+        )
     except ValueError:
         return [f"Field '{field_name}' must be a valid ISO timestamp"]
+
+    if (
+        timestamp.tzinfo is None
+        or timestamp.utcoffset() is None
+    ):
+        return [
+            f"Field '{field_name}' must include a timezone"
+        ]
 
     return []
 

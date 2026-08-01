@@ -138,6 +138,35 @@ def test_v2_contains_nullable_source_channel() -> None:
     )
 
 
+def test_v2_preserves_v1_quality_and_currency_rules() -> None:
+    contracts = load_contracts(CONTRACTS_DIR)
+
+    v1 = get_contract(
+        contracts=contracts,
+        name="order_created",
+        version=1,
+    )
+
+    v2 = get_contract(
+        contracts=contracts,
+        name="order_created",
+        version=2,
+    )
+
+    v2_fields = {
+        field["name"]: field
+        for field in v2["schema"]["fields"]
+    }
+
+    assert v2["quality"] == v1["quality"]
+    assert v2["schema"]["allow_extra_fields"] is False
+    assert v2_fields["currency"]["enum"] == [
+        "RUB",
+        "USD",
+        "EUR",
+    ]
+
+
 def test_every_contract_has_fields() -> None:
     contracts = load_contracts(CONTRACTS_DIR)
 

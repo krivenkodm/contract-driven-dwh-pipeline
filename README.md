@@ -32,7 +32,7 @@ The pipeline uses this contract to:
 * load valid events into the raw layer
 * save invalid events into a dead-letter table
 * build DDS and mart tables
-* run basic data quality checks
+* surface basic duplicate-event data quality flags
 
 ---
 
@@ -97,25 +97,34 @@ contract-driven-dwh-pipeline/
 │
 ├── contracts/
 │   ├── order_created.v1.yaml
-│   └── order_paid.v1.yaml
+│   ├── order_created.v2.yaml
+│   ├── order_paid.v1.yaml
+│   └── order_cancelled.v1.yaml
 │
 ├── src/
 │   ├── contract_loader.py
+│   ├── contract_registry.py
+│   ├── compatibility_checker.py
 │   ├── ddl_generator.py
 │   ├── validator.py
 │   ├── producer.py
 │   ├── consumer.py
-│   └── dwh_writer.py
+│   ├── dwh_writer.py
+│   └── topic_manager.py
 │
 ├── sql/
 │   ├── raw/
 │   ├── dds/
-│   └── mart/
+│   ├── mart/
+│   ├── migrations/
+│   └── tests/
+│
+├── scripts/
+│   ├── migrate.sh
+│   └── e2e_smoke.sh
 │
 ├── tests/
-│   ├── test_contract_validation.py
-│   ├── test_ddl_generation.py
-│   └── test_event_validation.py
+│   └── test_*.py
 │
 ├── docker-compose.yml
 ├── Makefile
@@ -195,16 +204,21 @@ The raw table is generated from the contract.
 
 ```sql
 CREATE TABLE IF NOT EXISTS raw_order_created (
-    kafka_topic varchar,
-    kafka_partition integer,
-    kafka_offset bigint,
-    kafka_load_dttm timestamp,
+    raw_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    kafka_topic varchar NOT NULL,
+    kafka_partition integer NOT NULL,
+    kafka_offset bigint NOT NULL,
+    kafka_load_dttm timestamptz NOT NULL,
 
     order_id varchar NOT NULL,
     customer_id varchar NOT NULL,
     amount numeric(12,2) NOT NULL,
     currency varchar NOT NULL,
-    created_at timestamp NOT NULL
+    created_at timestamptz NOT NULL,
+    source_channel varchar,
+
+    CONSTRAINT uq_raw_order_created_kafka_message
+        UNIQUE (kafka_topic, kafka_partition, kafka_offset)
 );
 ```
 
@@ -220,7 +234,7 @@ Stores source events almost as they arrived.
 
 Purpose:
 
-* preserve original data
+* store validated event fields in typed columns
 * store Kafka metadata
 * support replay and debugging
 
@@ -260,18 +274,19 @@ Stores analytics-ready tables.
 Example:
 
 ```text
-mart_daily_order_revenue
+mart_daily_orders
 ```
 
 Possible fields:
 
 ```text
-order_date
-currency
-orders_cnt
+order_dt
+created_orders_cnt
 paid_orders_cnt
-revenue_amt
-payment_conversion_pct
+cancelled_orders_cnt
+gross_order_amount
+paid_revenue
+orders_with_dq_cnt
 ```
 
 ---
@@ -289,7 +304,7 @@ CREATE TABLE IF NOT EXISTS dead_letter_events (
     kafka_offset bigint,
     event_payload jsonb,
     error_message text,
-    load_dttm timestamp
+    load_dttm timestamptz
 );
 ```
 
@@ -311,52 +326,54 @@ This prevents the same Kafka message from being loaded twice.
 
 ## 11. Local Run
 
-Start infrastructure:
+Create a virtual environment and install dependencies:
 
 ```bash
-make up
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 ```
 
-Generate raw DWH DDL:
+Bootstrap infrastructure, topics and database objects:
 
 ```bash
-make generate-ddl
+make bootstrap
 ```
 
-Initialize database:
+Produce a set of demo events:
 
 ```bash
-make init-db
+make demo
 ```
 
-Produce demo events:
+Build the incremental DDS and mart layers:
 
 ```bash
-make produce-orders
+make build-analytics
 ```
 
-Consume events and load them into PostgreSQL:
+Run the end-to-end smoke test against the running stack:
 
 ```bash
-make consume-orders
+make e2e
 ```
 
-Build DDS and mart tables:
-
-```bash
-make build-marts
-```
-
-Run data quality checks:
-
-```bash
-make dq
-```
-
-Run tests:
+Run unit tests and contract compatibility checks:
 
 ```bash
 make test
+make check-contracts
+```
+
+Inspect the result:
+
+```bash
+make psql
+```
+
+Rebuild all DWH layers from the retained Kafka events:
+
+```bash
+make rebuild-from-kafka
 ```
 
 Stop infrastructure:
@@ -411,29 +428,21 @@ order_created.v2.yaml
 
 ## 14. Data Quality Checks
 
-Example checks:
+The current pipeline validates required fields, types, enums and timestamp
+timezones before RAW insertion. DDS also exposes duplicate-event indicators:
 
-```sql
-SELECT count(*)
-FROM raw_order_created
-WHERE order_id IS NULL;
+```text
+duplicate_created_events_cnt
+dq_multiple_payments_flg
+dq_multiple_cancellations_flg
 ```
 
-```sql
-SELECT order_id, count(*)
-FROM raw_order_created
-GROUP BY order_id
-HAVING count(*) > 1;
-```
+Further useful checks:
 
-Possible checks:
-
-* required fields are not null
-* business key is unique
-* enum values are valid
 * amount is non-negative
-* event time is valid
-* Kafka offsets are not duplicated
+* payment amount and currency match the order
+* lifecycle timestamps are consistent
+* orphan payment and cancellation events are monitored
 
 ---
 
@@ -462,13 +471,13 @@ Built a contract-driven DWH ingestion pipeline using Python, PostgreSQL and Kafk
 
 ## 17. Future Improvements
 
-* add Schema Registry
-* add Avro or Protobuf serialization
-* add dbt transformations
-* add CI checks for contract compatibility
-* add more events: `order_paid`, `order_cancelled`
-* add historical DDS loading
-* add a simple BI dashboard
+* add a formal contract meta-schema
+* preserve the original Kafka payload and headers in RAW/DLQ
+* fix old/new date tracking for incremental mart rebuilds
+* add database-backed integration tests and CI
+* add Schema Registry with Avro or Protobuf serialization
+* move transformations to dbt and add orchestration
+* add historical DDS loading and a BI dashboard
 
 ---
 

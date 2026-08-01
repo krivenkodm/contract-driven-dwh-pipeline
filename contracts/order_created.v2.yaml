@@ -11,6 +11,8 @@ key:
   - order_id
 
 schema:
+  allow_extra_fields: false
+
   fields:
     - name: order_id
       type: string
@@ -27,6 +29,7 @@ schema:
     - name: currency
       type: string
       nullable: false
+      enum: ["RUB", "USD", "EUR"]
 
     - name: created_at
       type: timestamp
@@ -35,3 +38,13 @@ schema:
     - name: source_channel
       type: string
       nullable: true
+
+quality:
+  unique_key:
+    - order_id
+
+  not_null:
+    - order_id
+    - customer_id
+    - amount
+    - created_at

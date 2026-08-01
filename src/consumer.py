@@ -5,7 +5,12 @@ import time
 from json import JSONDecodeError
 from typing import Any
 
-from confluent_kafka import Consumer, KafkaError, Message
+from confluent_kafka import (
+    Consumer,
+    KafkaError,
+    Message,
+    TopicPartition,
+)
 from dotenv import load_dotenv
 
 from contract_registry import (
@@ -16,17 +21,50 @@ from dwh_writer import DwhWriter
 from validator import validate_event
 
 
+def reject_non_standard_json_constant(value: str) -> None:
+    raise ValueError(
+        f"Non-standard JSON constant is not allowed: {value}"
+    )
+
+
+def log_partition_assignment(
+    _: Consumer,
+    partitions: list[TopicPartition],
+) -> None:
+    assigned_partitions = ", ".join(
+        f"{partition.topic}[{partition.partition}]"
+        for partition in partitions
+    )
+
+    print(
+        "Consumer assigned partitions: "
+        f"{assigned_partitions}",
+        flush=True,
+    )
+
+
 def parse_message(
     message: Message,
 ) -> tuple[dict[str, Any] | None, list[str]]:
+    message_value = message.value()
+
+    if message_value is None:
+        return None, ["Message payload must not be null"]
+
     try:
-        raw_value = message.value().decode("utf-8")
-        payload = json.loads(raw_value)
+        raw_value = message_value.decode("utf-8")
+        payload = json.loads(
+            raw_value,
+            parse_constant=reject_non_standard_json_constant,
+        )
 
     except UnicodeDecodeError as error:
         return None, [f"Message is not valid UTF-8: {error}"]
 
     except JSONDecodeError as error:
+        return None, [f"Message is not valid JSON: {error}"]
+
+    except ValueError as error:
         return None, [f"Message is not valid JSON: {error}"]
 
     if not isinstance(payload, dict):
@@ -45,12 +83,19 @@ def process_message(
     errors = list(parsing_errors)
 
     if payload is not None:
-        errors.extend(
-            validate_event(
-                event=payload,
-                contract=contract,
+        try:
+            errors.extend(
+                validate_event(
+                    event=payload,
+                    contract=contract,
+                )
             )
-        )
+
+        except Exception as error:
+            errors.append(
+                "Unexpected event validation error: "
+                f"{type(error).__name__}: {error}"
+            )
 
     metadata = {
         "kafka_topic": message.topic(),
@@ -157,7 +202,10 @@ def main() -> None:
         )
     )
 
-    consumer.subscribe(topics)
+    consumer.subscribe(
+        topics,
+        on_assign=log_partition_assignment,
+    )
 
     started_at = time.monotonic()
     last_message_at = started_at

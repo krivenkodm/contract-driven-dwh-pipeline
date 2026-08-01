@@ -12,6 +12,7 @@ POSTGRES_DB := dwh
 
 .PHONY: \
 	up \
+	bootstrap \
 	down \
 	reset \
 	status \
@@ -22,6 +23,7 @@ POSTGRES_DB := dwh
 	psql \
 	check-contracts \
 	generate-ddl \
+	init-raw \
 	init-db \
 	create-topics \
 	produce \
@@ -42,6 +44,39 @@ POSTGRES_DB := dwh
 
 up:
 	docker compose up -d --build
+
+
+bootstrap:
+	docker compose up -d --build redpanda postgres
+	@set -e; \
+	attempt=1; \
+	while ! docker compose exec -T postgres \
+		pg_isready \
+		-U $(POSTGRES_USER) \
+		-d $(POSTGRES_DB) \
+		>/dev/null 2>&1; do \
+		if [ "$$attempt" -ge 30 ]; then \
+			echo "PostgreSQL did not become ready"; \
+			exit 1; \
+		fi; \
+		sleep 1; \
+		attempt=$$((attempt + 1)); \
+	done
+	$(MAKE) init-db
+	docker compose up -d --build topic-init consumer
+	@set -e; \
+	attempt=1; \
+	while ! docker compose logs --no-color consumer \
+		2>/dev/null \
+		| grep -q "Consumer assigned partitions"; do \
+		if [ "$$attempt" -ge 60 ]; then \
+			echo "Consumer did not receive a partition assignment"; \
+			docker compose logs --tail=100 consumer; \
+			exit 1; \
+		fi; \
+		sleep 1; \
+		attempt=$$((attempt + 1)); \
+	done
 
 
 down:
@@ -89,7 +124,7 @@ generate-ddl: check-contracts
 	$(PYTHON) src/ddl_generator.py
 
 
-init-db: generate-ddl
+init-raw: generate-ddl
 	@set -e; \
 	for file in sql/raw/*.sql; do \
 		if [ -f "$$file" ]; then \
@@ -102,7 +137,9 @@ init-db: generate-ddl
 				< "$$file"; \
 		fi; \
 	done
-	$(MAKE) migrate
+
+
+init-db: migrate
 
 
 create-topics:
@@ -229,5 +266,5 @@ demo:
 e2e:
 	./scripts/e2e_smoke.sh
 
-migrate:
+migrate: init-raw
 	./scripts/migrate.sh
