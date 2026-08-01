@@ -9,6 +9,9 @@ POSTGRES_CONTAINER := contract_dwh_postgres
 POSTGRES_USER := dwh
 POSTGRES_DB := dwh
 
+INTEGRATION_POSTGRES_ADMIN_DSN ?= \
+	postgresql://dwh:dwh@localhost:55432/postgres
+
 
 .PHONY: \
 	up \
@@ -37,6 +40,12 @@ POSTGRES_DB := dwh
 	build-analytics \
 	rebuild-from-kafka \
 	test \
+	test-unit \
+	test-integration \
+	postgres-up \
+	wait-postgres \
+	ci \
+	ci-logs \
 	demo \
 	e2e \
 	migrate
@@ -46,8 +55,12 @@ up:
 	docker compose up -d --build
 
 
-bootstrap:
-	docker compose up -d --build redpanda postgres
+postgres-up:
+	docker compose up -d postgres
+	$(MAKE) wait-postgres
+
+
+wait-postgres:
 	@set -e; \
 	attempt=1; \
 	while ! docker compose exec -T postgres \
@@ -62,6 +75,11 @@ bootstrap:
 		sleep 1; \
 		attempt=$$((attempt + 1)); \
 	done
+
+
+bootstrap:
+	docker compose up -d --build redpanda postgres
+	$(MAKE) wait-postgres
 	$(MAKE) init-db
 	docker compose up -d --build topic-init consumer
 	@set -e; \
@@ -244,8 +262,30 @@ rebuild-from-kafka:
 	$(MAKE) build-analytics
 
 
-test:
-	$(PYTHON) -m pytest -v
+test: test-unit
+
+
+test-unit:
+	$(PYTHON) -m pytest -v -m "not integration"
+
+
+test-integration: postgres-up
+	RUN_INTEGRATION_TESTS=1 \
+	INTEGRATION_POSTGRES_ADMIN_DSN=$(INTEGRATION_POSTGRES_ADMIN_DSN) \
+	$(PYTHON) -m pytest -v -m integration tests/integration
+
+
+ci:
+	$(MAKE) check-contracts
+	$(MAKE) test-unit
+	$(MAKE) test-integration
+	$(MAKE) bootstrap
+	$(MAKE) e2e
+
+
+ci-logs:
+	docker compose ps -a
+	docker compose logs --no-color --tail=300
 
 
 demo:

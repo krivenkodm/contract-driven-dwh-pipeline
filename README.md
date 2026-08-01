@@ -88,6 +88,7 @@ The pipeline uses this contract to:
 * YAML data contracts
 * Docker Compose
 * pytest
+* GitHub Actions
 * Makefile
 
 ---
@@ -126,7 +127,11 @@ contract-driven-dwh-pipeline/
 │   └── e2e_smoke.sh
 │
 ├── tests/
+│   ├── integration/
 │   └── test_*.py
+│
+├── .github/workflows/
+│   └── ci.yml
 │
 ├── docker-compose.yml
 ├── Makefile
@@ -386,9 +391,28 @@ make e2e
 Run unit tests and contract compatibility checks:
 
 ```bash
-make test
+make test-unit
 make check-contracts
 ```
+
+Run isolated PostgreSQL integration tests. The command starts PostgreSQL,
+creates temporary databases with the `contract_dwh_it_` prefix, applies the
+production migration script, and drops the databases after the test session:
+
+```bash
+make test-integration
+```
+
+Run the same complete sequence used by CI:
+
+```bash
+make ci
+```
+
+The CI workflow validates contracts, runs unit tests, tests fresh and populated
+database migrations, starts the full Redpanda/PostgreSQL stack, and executes the
+RAW → DDS → MART smoke test. Docker status and logs are uploaded as an artifact
+when a job fails.
 
 Inspect the result:
 
@@ -521,18 +545,19 @@ This project demonstrates practical knowledge of:
 * idempotent loading
 * data quality checks
 * analytical mart design
+* database-backed integration and migration testing
+* automated CI with end-to-end verification
 
 ---
 
 ## 16. Resume Description
 
-Built a contract-driven DWH ingestion pipeline using Python, PostgreSQL and Kafka-compatible streaming with Redpanda. Implemented automatic raw DWH DDL generation, event validation, dead-letter handling, idempotent ingestion and analytical mart creation.
+Built a contract-driven DWH ingestion pipeline using Python, PostgreSQL and Kafka-compatible streaming with Redpanda. Implemented automatic raw DWH DDL generation, event validation, dead-letter handling, idempotent ingestion, analytical marts, database integration tests and end-to-end CI.
 
 ---
 
 ## 17. Future Improvements
 
-* add database-backed integration tests and CI
 * add Schema Registry with Avro or Protobuf serialization
 * move transformations to dbt and add orchestration
 * add historical DDS loading and a BI dashboard
