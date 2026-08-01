@@ -100,3 +100,29 @@ def test_unexpected_validator_error_is_saved_to_dead_letter(
         "RuntimeError: validator failed"
         in writer.dead_letters[0]["error_message"]
     )
+    assert writer.dead_letters[0]["contract"] is contract
+    assert (
+        writer.dead_letters[0]["raw_payload"]
+        == b'{"event_id": "event_1"}'
+    )
+
+
+def test_tombstone_is_saved_with_null_raw_payload() -> None:
+    writer = FakeWriter()
+    contract = {
+        "name": "test_event",
+        "version": 1,
+        "schema": {
+            "fields": [],
+        },
+    }
+
+    process_message(
+        message=FakeMessage(None),  # type: ignore[arg-type]
+        contract=contract,
+        writer=writer,  # type: ignore[arg-type]
+    )
+
+    assert len(writer.dead_letters) == 1
+    assert writer.dead_letters[0]["raw_payload"] is None
+    assert writer.dead_letters[0]["payload"] is None

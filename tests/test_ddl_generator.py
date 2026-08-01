@@ -1,6 +1,7 @@
-import os
 import subprocess
 from pathlib import Path
+
+from ddl_generator import generate_raw_ddl
 
 
 PROJECT_ROOT = (
@@ -102,6 +103,9 @@ def test_generated_ddl_contains_kafka_metadata() -> None:
     assert "kafka_topic" in ddl
     assert "kafka_partition" in ddl
     assert "kafka_offset" in ddl
+    assert "contract_name" in ddl
+    assert "contract_version" in ddl
+    assert "original_payload" in ddl
 
 
 def test_generated_ddl_contains_unique_kafka_key() -> None:
@@ -158,3 +162,27 @@ def test_generated_ddl_uses_timezone_aware_timestamps() -> None:
 
         assert "timestamptz" in ddl
         assert " timestamp " not in ddl
+
+
+def test_generated_ddl_uses_contract_default() -> None:
+    contract = {
+        "name": "test_event",
+        "version": 2,
+        "schema": {
+            "fields": [
+                {
+                    "name": "source",
+                    "type": "string",
+                    "nullable": False,
+                    "default": "unknown",
+                }
+            ]
+        },
+    }
+
+    ddl = generate_raw_ddl(contract)
+
+    assert (
+        "source varchar DEFAULT 'unknown' NOT NULL"
+        in ddl
+    )

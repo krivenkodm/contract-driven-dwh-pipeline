@@ -116,7 +116,15 @@ def validate_event(
         field_type = field["type"]
         nullable = field.get("nullable", True)
 
-        value = event.get(field_name)
+        field_is_present = field_name in event
+
+        if (
+            not field_is_present
+            and "default" in field
+        ):
+            value = field["default"]
+        else:
+            value = event.get(field_name)
 
         if value is None:
             if not nullable:

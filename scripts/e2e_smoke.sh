@@ -11,6 +11,7 @@ WAIT_ATTEMPTS="${WAIT_ATTEMPTS:-30}"
 WAIT_DELAY_SECONDS="${WAIT_DELAY_SECONDS:-1}"
 
 ORDER_ID="${ORDER_ID:-ord_e2e_$(date +%Y%m%d%H%M%S)_$$}"
+INVALID_ORDER_ID="${ORDER_ID}_invalid"
 
 if [[ ! "${ORDER_ID}" =~ ^[a-zA-Z0-9_-]+$ ]]; then
     echo "ERROR: invalid ORDER_ID: ${ORDER_ID}"
@@ -78,13 +79,45 @@ wait_for_raw_event() {
 }
 
 
+wait_for_dlq_event() {
+    local attempt
+    local rows_count
+
+    for ((attempt = 1; attempt <= WAIT_ATTEMPTS; attempt++)); do
+        rows_count="$(
+            psql_scalar "
+                SELECT COUNT(*)
+                FROM dead_letter_events
+                WHERE event_payload ->> 'order_id'
+                    = '${INVALID_ORDER_ID}';
+            "
+        )"
+
+        if [[ "${rows_count}" -ge 1 ]]; then
+            echo "Found ${INVALID_ORDER_ID} in dead_letter_events"
+            return
+        fi
+
+        echo \
+            "Waiting for ${INVALID_ORDER_ID} in dead_letter_events" \
+            "(${attempt}/${WAIT_ATTEMPTS})..."
+
+        sleep "${WAIT_DELAY_SECONDS}"
+    done
+
+    echo "ERROR: invalid event did not reach dead_letter_events"
+    docker compose logs --tail=100 consumer
+    exit 1
+}
+
+
 echo "========================================"
 echo "E2E smoke test"
 echo "Order ID: ${ORDER_ID}"
 echo "========================================"
 
 echo
-echo "[1/6] Checking infrastructure"
+echo "[1/8] Checking infrastructure"
 
 require_running_service redpanda
 require_running_service postgres
@@ -93,28 +126,92 @@ require_running_service consumer
 echo "Infrastructure is running"
 
 echo
-echo "[2/6] Producing order_created"
+echo "[2/8] Producing order_created"
 
 make produce-created ORDER_ID="${ORDER_ID}"
 
 echo
-echo "[3/6] Producing order_paid"
+echo "[3/8] Producing order_paid"
 
 make produce-paid ORDER_ID="${ORDER_ID}"
 
 echo
-echo "[4/6] Waiting for events in RAW"
+echo "[4/8] Producing invalid order_created"
+
+.venv/bin/python src/producer.py \
+    --event order_created \
+    --order-id "${INVALID_ORDER_ID}" \
+    --invalid
+
+echo
+echo "[5/8] Waiting for RAW and DLQ events"
 
 wait_for_raw_event raw_order_created
 wait_for_raw_event raw_order_paid
+wait_for_dlq_event
 
 echo
-echo "[5/6] Building DDS and MART"
+echo "[6/8] Checking contract provenance and payload retention"
+
+valid_raw_provenance_count="$(
+    psql_scalar "
+        SELECT COUNT(*)
+        FROM raw_order_created
+        WHERE order_id = '${ORDER_ID}'
+          AND contract_name = 'order_created'
+          AND contract_version = 2
+          AND original_payload ->> 'order_id' = '${ORDER_ID}';
+    "
+)"
+
+if [[ "${valid_raw_provenance_count}" -ne 1 ]]; then
+    echo "ERROR: order_created RAW provenance is invalid"
+    exit 1
+fi
+
+paid_raw_provenance_count="$(
+    psql_scalar "
+        SELECT COUNT(*)
+        FROM raw_order_paid
+        WHERE order_id = '${ORDER_ID}'
+          AND contract_name = 'order_paid'
+          AND contract_version = 1
+          AND original_payload ->> 'order_id' = '${ORDER_ID}';
+    "
+)"
+
+if [[ "${paid_raw_provenance_count}" -ne 1 ]]; then
+    echo "ERROR: order_paid RAW provenance is invalid"
+    exit 1
+fi
+
+valid_dlq_provenance_count="$(
+    psql_scalar "
+        SELECT COUNT(*)
+        FROM dead_letter_events
+        WHERE event_payload ->> 'order_id' = '${INVALID_ORDER_ID}'
+          AND contract_name = 'order_created'
+          AND contract_version = 2
+          AND raw_payload IS NOT NULL
+          AND convert_from(raw_payload, 'UTF8')::jsonb
+                ->> 'order_id' = '${INVALID_ORDER_ID}';
+    "
+)"
+
+if [[ "${valid_dlq_provenance_count}" -ne 1 ]]; then
+    echo "ERROR: DLQ provenance or raw payload is invalid"
+    exit 1
+fi
+
+echo "RAW and DLQ provenance is valid"
+
+echo
+echo "[7/8] Building DDS and MART"
 
 make build-analytics
 
 echo
-echo "[6/6] Checking DDS and MART"
+echo "[8/8] Checking DDS and MART"
 
 dds_rows_count="$(
     psql_scalar "

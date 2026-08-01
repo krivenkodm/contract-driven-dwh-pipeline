@@ -1,12 +1,11 @@
 import os
 import time
 from pathlib import Path
-from typing import Any
 
 from confluent_kafka import KafkaError, KafkaException
 from confluent_kafka.admin import AdminClient, NewTopic
 
-from contract_loader import load_contract
+from contract_registry import Contract, load_contracts
 
 
 DEFAULT_BROKER_WAIT_SECONDS = 60
@@ -46,32 +45,18 @@ def wait_for_broker(
 
 def load_all_contracts(
     contracts_dir: Path,
-) -> list[dict[str, Any]]:
-    if not contracts_dir.exists():
-        raise RuntimeError(
-            f"Contracts directory does not exist: {contracts_dir}"
-        )
-
-    contract_paths = sorted(
-        set(contracts_dir.glob("*.yaml"))
-        | set(contracts_dir.glob("*.yml"))
+) -> list[Contract]:
+    contracts = load_contracts(
+        contracts_dir
     )
 
-    if not contract_paths:
-        raise RuntimeError(
-            f"No YAML contracts found in directory: {contracts_dir}"
-        )
-
-    contracts: list[dict[str, Any]] = []
-
-    for contract_path in contract_paths:
+    for contract in contracts:
         print(
-            f"Loading contract: {contract_path.name}",
+            "Loaded contract: "
+            f"{contract['name']} "
+            f"v{contract['version']}",
             flush=True,
         )
-
-        contract = load_contract(contract_path)
-        contracts.append(contract)
 
     return contracts
 

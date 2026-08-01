@@ -105,6 +105,8 @@ def process_message(
 
     if errors:
         inserted = writer.write_dead_letter(
+            contract=contract,
+            raw_payload=message.value(),
             payload=payload,
             error_message="; ".join(errors),
             **metadata,

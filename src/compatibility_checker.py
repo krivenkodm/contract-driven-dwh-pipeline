@@ -39,6 +39,21 @@ def check_backward_compatibility(
 
         return errors
 
+    old_topic_namespace = old_contract[
+        "topic"
+    ].rsplit(".v", maxsplit=1)[0]
+
+    new_topic_namespace = new_contract[
+        "topic"
+    ].rsplit(".v", maxsplit=1)[0]
+
+    if old_topic_namespace != new_topic_namespace:
+        errors.append(
+            f"{contract_name} v{old_version} -> "
+            f"v{new_version}: topic namespace changed from "
+            f"{old_topic_namespace} to {new_topic_namespace}"
+        )
+
     old_key = old_contract.get("key", [])
     new_key = new_contract.get("key", [])
 
@@ -47,6 +62,47 @@ def check_backward_compatibility(
             f"{contract_name} v{old_version} -> "
             f"v{new_version}: key changed from "
             f"{old_key} to {new_key}"
+        )
+
+    old_allow_extra_fields = old_contract[
+        "schema"
+    ]["allow_extra_fields"]
+
+    new_allow_extra_fields = new_contract[
+        "schema"
+    ]["allow_extra_fields"]
+
+    if (
+        old_allow_extra_fields
+        and not new_allow_extra_fields
+    ):
+        errors.append(
+            f"{contract_name} v{old_version} -> "
+            f"v{new_version}: extra fields became forbidden"
+        )
+
+    old_quality = old_contract["quality"]
+    new_quality = new_contract["quality"]
+
+    if (
+        old_quality["unique_key"]
+        != new_quality["unique_key"]
+    ):
+        errors.append(
+            f"{contract_name} v{old_version} -> "
+            f"v{new_version}: quality.unique_key changed"
+        )
+
+    added_not_null_fields = sorted(
+        set(new_quality["not_null"])
+        - set(old_quality["not_null"])
+    )
+
+    if added_not_null_fields:
+        errors.append(
+            f"{contract_name} v{old_version} -> "
+            f"v{new_version}: quality.not_null added "
+            f"fields {added_not_null_fields}"
         )
 
     old_fields = fields_by_name(old_contract)
@@ -92,6 +148,43 @@ def check_backward_compatibility(
                 f"{field_name} became required"
             )
 
+        old_enum = old_field.get("enum")
+        new_enum = new_field.get("enum")
+
+        if old_enum is None and new_enum is not None:
+            errors.append(
+                f"{contract_name} v{old_version} -> "
+                f"v{new_version}: field {field_name} "
+                "added an enum restriction"
+            )
+
+        elif old_enum is not None and new_enum is not None:
+            removed_enum_values = sorted(
+                set(old_enum) - set(new_enum)
+            )
+
+            if removed_enum_values:
+                errors.append(
+                    f"{contract_name} v{old_version} -> "
+                    f"v{new_version}: field {field_name} "
+                    "removed enum values "
+                    f"{removed_enum_values}"
+                )
+
+        if (
+            "default" in old_field
+            and (
+                "default" not in new_field
+                or old_field["default"]
+                != new_field["default"]
+            )
+        ):
+            errors.append(
+                f"{contract_name} v{old_version} -> "
+                f"v{new_version}: field {field_name} "
+                "changed or removed its default"
+            )
+
     for field_name, new_field in new_fields.items():
         if field_name in old_fields:
             continue
@@ -101,7 +194,10 @@ def check_backward_compatibility(
             True,
         )
 
-        if not nullable:
+        if (
+            not nullable
+            and "default" not in new_field
+        ):
             errors.append(
                 f"{contract_name} v{old_version} -> "
                 f"v{new_version}: new field "
@@ -175,9 +271,9 @@ def check_all_contracts(
             old_version = old_contract["version"]
             new_version = new_contract["version"]
 
-            if new_version <= old_version:
+            if new_version != old_version + 1:
                 errors.append(
-                    f"{name}: invalid version order "
+                    f"{name}: non-contiguous version order "
                     f"{old_version} -> {new_version}"
                 )
 

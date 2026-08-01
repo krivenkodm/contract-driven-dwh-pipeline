@@ -31,6 +31,8 @@ The pipeline uses this contract to:
 * validate incoming events
 * load valid events into the raw layer
 * save invalid events into a dead-letter table
+* preserve the validated JSON payload and contract version in RAW
+* preserve the original message bytes and contract version in DLQ
 * build DDS and mart tables
 * surface basic duplicate-event data quality flags
 
@@ -96,13 +98,13 @@ The pipeline uses this contract to:
 contract-driven-dwh-pipeline/
 │
 ├── contracts/
+│   ├── data_contract.schema.json
 │   ├── order_created.v1.yaml
 │   ├── order_created.v2.yaml
 │   ├── order_paid.v1.yaml
 │   └── order_cancelled.v1.yaml
 │
 ├── src/
-│   ├── contract_loader.py
 │   ├── contract_registry.py
 │   ├── compatibility_checker.py
 │   ├── ddl_generator.py
@@ -146,6 +148,7 @@ key:
   - order_id
 
 schema:
+  allow_extra_fields: false
   fields:
     - name: order_id
       type: string
@@ -192,7 +195,7 @@ compatibility:
   "customer_id": "cust_777",
   "amount": 1500.50,
   "currency": "RUB",
-  "created_at": "2026-07-15T12:00:00"
+  "created_at": "2026-07-15T12:00:00Z"
 }
 ```
 
@@ -209,6 +212,9 @@ CREATE TABLE IF NOT EXISTS raw_order_created (
     kafka_partition integer NOT NULL,
     kafka_offset bigint NOT NULL,
     kafka_load_dttm timestamptz NOT NULL,
+    contract_name varchar NOT NULL,
+    contract_version integer NOT NULL,
+    original_payload jsonb NOT NULL,
 
     order_id varchar NOT NULL,
     customer_id varchar NOT NULL,
@@ -222,7 +228,16 @@ CREATE TABLE IF NOT EXISTS raw_order_created (
 );
 ```
 
-The raw layer stores source events with Kafka metadata.
+The raw layer stores typed event fields, Kafka coordinates, the contract name
+and version used for validation, and the complete validated JSON object. This
+makes replay and schema-version debugging independent of the current contract.
+
+Before a contract is used, `contract_registry.py` validates it against
+`contracts/data_contract.schema.json` and then performs semantic checks that
+JSON Schema alone cannot express. These include field-reference validity,
+non-null business keys, decimal precision and scale, default values, contiguous
+versions, `quality.not_null` consistency, and agreement between the filename,
+topic and version.
 
 ---
 
@@ -304,16 +319,22 @@ They are saved into a dead-letter table:
 
 ```sql
 CREATE TABLE IF NOT EXISTS dead_letter_events (
-    kafka_topic varchar,
-    kafka_partition integer,
-    kafka_offset bigint,
+    kafka_topic varchar NOT NULL,
+    kafka_partition integer NOT NULL,
+    kafka_offset bigint NOT NULL,
+    contract_name varchar NOT NULL,
+    contract_version integer NOT NULL,
+    raw_payload bytea,
     event_payload jsonb,
-    error_message text,
-    load_dttm timestamptz
+    error_message text NOT NULL,
+    load_dttm timestamptz NOT NULL
 );
 ```
 
-This allows the pipeline to keep processing valid events while preserving invalid ones for debugging.
+`raw_payload` preserves the bytes received from Kafka, including malformed JSON
+or invalid UTF-8. It is `NULL` for a Kafka tombstone or a legacy row created
+before byte retention was introduced. `event_payload` contains parsed JSON when
+parsing succeeded. The Kafka coordinates make DLQ insertion idempotent.
 
 ---
 
@@ -411,23 +432,34 @@ GROUP BY
 Allowed changes:
 
 * add a nullable field
-* add metadata or descriptions
-* add a new enum value if downstream logic supports it
+* add a required field with a valid default
+* add or expand a string enum
+* add descriptions
 
 Breaking changes:
 
 * remove a field
 * rename a field
 * change field type
-* make a nullable field non-nullable without a default value
-* change event semantics without creating a new version
+* make an existing nullable field non-nullable
+* restrict or remove enum values
+* change or remove an existing default
+* change `key` or `quality.unique_key`
+* add fields to `quality.not_null`
+* change `allow_extra_fields` from `true` to `false`
+* move a version chain to another topic namespace
 
-For breaking changes, create a new contract version:
+Every evolution uses the next contiguous contract version:
 
 ```text
 order_created.v1.yaml
 order_created.v2.yaml
 ```
+
+The checker treats the versions above as one compatibility chain and rejects a
+breaking transition. A genuinely breaking event shape should use a new event
+name/topic and be migrated explicitly instead of being presented as backward
+compatible.
 
 ---
 
@@ -481,7 +513,10 @@ This project demonstrates practical knowledge of:
 * DWH layering
 * raw, DDS and mart architecture
 * schema validation
+* formal contract meta-schema and semantic validation
+* backward compatibility checks
 * DDL generation
+* contract provenance and payload retention in RAW/DLQ
 * dead-letter handling
 * idempotent loading
 * data quality checks
@@ -497,12 +532,11 @@ Built a contract-driven DWH ingestion pipeline using Python, PostgreSQL and Kafk
 
 ## 17. Future Improvements
 
-* add a formal contract meta-schema
-* preserve the original Kafka payload and headers in RAW/DLQ
 * add database-backed integration tests and CI
 * add Schema Registry with Avro or Protobuf serialization
 * move transformations to dbt and add orchestration
 * add historical DDS loading and a BI dashboard
+* retain Kafka headers and producer/schema identifiers
 
 ---
 

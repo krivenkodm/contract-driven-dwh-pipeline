@@ -194,3 +194,24 @@ def test_timestamp_without_timezone_is_rejected(
         "timezone" in error
         for error in errors
     )
+
+
+def test_missing_required_field_with_default_is_valid() -> None:
+    contract = {
+        "schema": {
+            "allow_extra_fields": False,
+            "fields": [
+                {
+                    "name": "source",
+                    "type": "string",
+                    "nullable": False,
+                    "default": "unknown",
+                }
+            ],
+        }
+    }
+
+    assert validate_event(
+        event={},
+        contract=contract,
+    ) == []

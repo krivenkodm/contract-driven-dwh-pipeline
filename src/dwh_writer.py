@@ -32,6 +32,9 @@ class DwhWriter:
             "kafka_partition",
             "kafka_offset",
             "kafka_load_dttm",
+            "contract_name",
+            "contract_version",
+            "original_payload",
             *event_fields,
         ]
 
@@ -40,7 +43,17 @@ class DwhWriter:
             kafka_partition,
             kafka_offset,
             sql.SQL("CURRENT_TIMESTAMP"),
-            *[event.get(field_name) for field_name in event_fields],
+            contract["name"],
+            contract["version"],
+            Jsonb(event),
+            *[
+                (
+                    event[field["name"]]
+                    if field["name"] in event
+                    else field.get("default")
+                )
+                for field in contract["schema"]["fields"]
+            ],
         ]
 
         value_parts = []
@@ -89,6 +102,8 @@ class DwhWriter:
 
     def write_dead_letter(
         self,
+        contract: dict[str, Any],
+        raw_payload: bytes | None,
         payload: dict[str, Any] | None,
         error_message: str,
         kafka_topic: str,
@@ -100,10 +115,13 @@ class DwhWriter:
                 kafka_topic,
                 kafka_partition,
                 kafka_offset,
+                contract_name,
+                contract_version,
+                raw_payload,
                 event_payload,
                 error_message
             )
-            VALUES (%s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (
                 kafka_topic,
                 kafka_partition,
@@ -119,6 +137,9 @@ class DwhWriter:
                     kafka_topic,
                     kafka_partition,
                     kafka_offset,
+                    contract["name"],
+                    contract["version"],
+                    raw_payload,
                     Jsonb(payload) if payload is not None else None,
                     error_message,
                 ),

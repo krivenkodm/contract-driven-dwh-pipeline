@@ -1,6 +1,7 @@
 import os
 import re
 from collections import defaultdict
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +68,33 @@ def to_sql_type(
     return TYPE_MAPPING[contract_type]
 
 
+def to_sql_literal(
+    value: Any,
+    contract_type: str,
+) -> str:
+    if value is None:
+        return "NULL"
+
+    if contract_type in {
+        "string",
+        "timestamp",
+    }:
+        escaped_value = str(value).replace(
+            "'",
+            "''",
+        )
+
+        return f"'{escaped_value}'"
+
+    if contract_type.startswith("decimal"):
+        return str(Decimal(str(value)))
+
+    raise ValueError(
+        "Unsupported default for contract type: "
+        f"{contract_type}"
+    )
+
+
 def get_latest_contracts(
     contracts: list[Contract],
 ) -> list[Contract]:
@@ -122,6 +150,9 @@ def generate_raw_ddl(
         "kafka_partition integer NOT NULL",
         "kafka_offset bigint NOT NULL",
         "kafka_load_dttm timestamptz NOT NULL",
+        "contract_name varchar NOT NULL",
+        "contract_version integer NOT NULL",
+        "original_payload jsonb NOT NULL",
     ]
 
     for field in contract["schema"]["fields"]:
@@ -146,9 +177,20 @@ def generate_raw_ddl(
             else ""
         )
 
+        default = (
+            " DEFAULT "
+            + to_sql_literal(
+                value=field["default"],
+                contract_type=field["type"],
+            )
+            if "default" in field
+            else ""
+        )
+
         columns.append(
             f"{field_name} "
             f"{sql_type}"
+            f"{default}"
             f"{not_null}"
         )
 
