@@ -7,6 +7,8 @@ EVENT ?= order_created
 ORDER_ID ?= ord_1001
 VERSION ?=
 SOURCE_CHANNEL ?=
+SERIALIZATION ?= json
+SCHEMA_REGISTRY_URL ?= http://localhost:18081
 
 POSTGRES_CONTAINER := contract_dwh_postgres
 POSTGRES_USER := dwh
@@ -39,11 +41,17 @@ GRAFANA_DB_PASSWORD ?= grafana
 	logs-topic-init \
 	psql \
 	check-contracts \
+	generate-avro \
+	check-avro-schemas \
 	generate-ddl \
 	init-raw \
 	init-db \
 	create-topics \
+	wait-schema-registry \
+	register-schemas \
+	schema-registry-check \
 	produce \
+	produce-avro \
 	produce-created \
 	produce-paid \
 	produce-cancelled \
@@ -84,6 +92,7 @@ GRAFANA_DB_PASSWORD ?= grafana
 	ci-logs \
 	demo \
 	e2e \
+	e2e-avro \
 	migrate
 
 
@@ -116,8 +125,10 @@ wait-postgres:
 bootstrap:
 	docker compose up -d --build redpanda postgres
 	$(MAKE) wait-postgres
+	$(MAKE) wait-schema-registry
+	$(MAKE) generate-avro
 	$(MAKE) init-db
-	docker compose up -d --build topic-init consumer
+	docker compose up -d --build topic-init schema-init consumer
 	@set -e; \
 	attempt=1; \
 	while ! docker compose logs --no-color consumer \
@@ -173,6 +184,19 @@ check-contracts:
 	$(PYTHON) src/compatibility_checker.py
 
 
+generate-avro: check-contracts
+	CONTRACTS_DIR=contracts \
+	$(PYTHON) src/avro_schema.py \
+		--output-directory schemas/avro
+
+
+check-avro-schemas: check-contracts
+	CONTRACTS_DIR=contracts \
+	$(PYTHON) src/avro_schema.py \
+		--output-directory schemas/avro \
+		--check
+
+
 generate-ddl: check-contracts
 	CONTRACTS_DIR=contracts \
 	$(PYTHON) src/ddl_generator.py
@@ -202,12 +226,45 @@ create-topics:
 	$(PYTHON) src/topic_manager.py
 
 
+wait-schema-registry:
+	@set -e; \
+	attempt=1; \
+	while ! curl --fail --silent --show-error \
+		$(SCHEMA_REGISTRY_URL)/subjects \
+		>/dev/null 2>&1; do \
+		if [ "$$attempt" -ge 30 ]; then \
+			echo "Schema Registry did not become ready"; \
+			exit 1; \
+		fi; \
+		sleep 1; \
+		attempt=$$((attempt + 1)); \
+	done
+
+
+register-schemas: generate-avro wait-schema-registry
+	CONTRACTS_DIR=contracts \
+	SCHEMA_REGISTRY_URL=$(SCHEMA_REGISTRY_URL) \
+	$(PYTHON) src/schema_registry_manager.py
+
+
+schema-registry-check: wait-schema-registry
+	CONTRACTS_DIR=contracts \
+	SCHEMA_REGISTRY_URL=$(SCHEMA_REGISTRY_URL) \
+	$(PYTHON) src/schema_registry_manager.py --check
+
+
 produce:
+	SCHEMA_REGISTRY_URL=$(SCHEMA_REGISTRY_URL) \
 	$(PYTHON) src/producer.py \
 		--event $(EVENT) \
 		--order-id $(ORDER_ID) \
+		--serialization $(SERIALIZATION) \
 		$(if $(strip $(VERSION)),--version $(VERSION),) \
 		$(if $(strip $(SOURCE_CHANNEL)),--source-channel $(SOURCE_CHANNEL),)
+
+
+produce-avro:
+	$(MAKE) produce SERIALIZATION=avro
 
 
 produce-created:
@@ -233,10 +290,12 @@ produce-cancelled:
 
 
 consume:
+	SCHEMA_REGISTRY_URL=$(SCHEMA_REGISTRY_URL) \
 	$(PYTHON) src/consumer.py
 
 
 consume-once:
+	SCHEMA_REGISTRY_URL=$(SCHEMA_REGISTRY_URL) \
 	$(PYTHON) src/consumer.py --once
 
 
@@ -481,6 +540,7 @@ rebuild-from-kafka:
 	echo "Replaying Kafka topics"; \
 	CONSUMER_GROUP_ID=contract-dwh-replay-$$(date +%s) \
 	KAFKA_BOOTSTRAP_SERVERS=localhost:19092 \
+	SCHEMA_REGISTRY_URL=$(SCHEMA_REGISTRY_URL) \
 	POSTGRES_DSN=postgresql://dwh:dwh@localhost:55432/dwh \
 	CONTRACTS_DIR=contracts \
 	$(PYTHON) src/consumer.py --idle-timeout 5; \
@@ -503,11 +563,13 @@ test-integration: postgres-up
 
 ci:
 	$(MAKE) check-contracts
+	$(MAKE) check-avro-schemas
 	$(MAKE) validate-monitoring-config
 	$(MAKE) test-unit
 	$(MAKE) test-integration
 	$(MAKE) bootstrap
 	$(MAKE) e2e
+	$(MAKE) e2e-avro
 
 
 ci-logs:
@@ -533,6 +595,11 @@ demo:
 
 
 e2e:
+	./scripts/e2e_smoke.sh
+
+
+e2e-avro: schema-registry-check
+	EVENT_SERIALIZATION=avro \
 	./scripts/e2e_smoke.sh
 
 migrate: init-raw

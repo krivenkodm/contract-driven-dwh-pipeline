@@ -1,8 +1,32 @@
+import json
+from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 import psycopg
 from psycopg import sql
 from psycopg.types.json import Jsonb
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return float(value)
+
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    raise TypeError(
+        f"Object of type {type(value).__name__} "
+        "is not JSON serializable"
+    )
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(
+        value,
+        default=_json_default,
+        ensure_ascii=False,
+    )
 
 
 class DwhWriter:
@@ -45,7 +69,7 @@ class DwhWriter:
             sql.SQL("CURRENT_TIMESTAMP"),
             contract["name"],
             contract["version"],
-            Jsonb(event),
+            Jsonb(event, dumps=_json_dumps),
             *[
                 (
                     event[field["name"]]
@@ -140,7 +164,11 @@ class DwhWriter:
                     contract["name"],
                     contract["version"],
                     raw_payload,
-                    Jsonb(payload) if payload is not None else None,
+                    (
+                        Jsonb(payload, dumps=_json_dumps)
+                        if payload is not None
+                        else None
+                    ),
                     error_message,
                 ),
             )

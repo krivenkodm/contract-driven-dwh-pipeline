@@ -10,6 +10,8 @@ services:
       - internal://0.0.0.0:9092,external://0.0.0.0:19092
       - --advertise-kafka-addr
       - internal://redpanda:9092,external://localhost:19092
+      - --schema-registry-addr
+      - internal://0.0.0.0:8081,external://0.0.0.0:18081
       - --rpc-addr
       - 0.0.0.0:33145
       - --advertise-rpc-addr
@@ -22,6 +24,7 @@ services:
 
     ports:
       - "19092:19092"
+      - "18081:18081"
       - "9644:9644"
 
     volumes:
@@ -78,6 +81,28 @@ services:
     restart: "no"
 
 
+  schema-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: contract_dwh_schema_init
+
+    command:
+      - python
+      - src/schema_registry_manager.py
+
+    environment:
+      SCHEMA_REGISTRY_URL: http://redpanda:8081
+      CONTRACTS_DIR: /app/contracts
+
+    depends_on:
+      redpanda:
+        condition: service_started
+
+    restart: "no"
+
+
   consumer:
     build:
       context: .
@@ -94,8 +119,11 @@ services:
       POSTGRES_DSN: postgresql://dwh:dwh@postgres:5432/dwh
       CONTRACTS_DIR: /app/contracts
       CONSUMER_GROUP_ID: contract-dwh-loader-v1
+      SCHEMA_REGISTRY_URL: http://redpanda:8081
 
     depends_on:
+      schema-init:
+        condition: service_completed_successfully
       topic-init:
         condition: service_completed_successfully
       postgres:

@@ -13,9 +13,16 @@ WAIT_DELAY_SECONDS="${WAIT_DELAY_SECONDS:-1}"
 ORDER_ID="${ORDER_ID:-ord_e2e_$(date +%Y%m%d%H%M%S)_$$}"
 INVALID_ORDER_ID="${ORDER_ID}_invalid"
 E2E_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+EVENT_SERIALIZATION="${EVENT_SERIALIZATION:-json}"
 
 if [[ ! "${ORDER_ID}" =~ ^[a-zA-Z0-9_-]+$ ]]; then
     echo "ERROR: invalid ORDER_ID: ${ORDER_ID}"
+    exit 1
+fi
+
+if [[ "${EVENT_SERIALIZATION}" != "json" \
+    && "${EVENT_SERIALIZATION}" != "avro" ]]; then
+    echo "ERROR: unsupported EVENT_SERIALIZATION: ${EVENT_SERIALIZATION}"
     exit 1
 fi
 
@@ -85,14 +92,29 @@ wait_for_dlq_event() {
     local rows_count
 
     for ((attempt = 1; attempt <= WAIT_ATTEMPTS; attempt++)); do
-        rows_count="$(
-            psql_scalar "
-                SELECT COUNT(*)
-                FROM dead_letter_events
-                WHERE event_payload ->> 'order_id'
-                    = '${INVALID_ORDER_ID}';
-            "
-        )"
+        if [[ "${EVENT_SERIALIZATION}" == "avro" ]]; then
+            rows_count="$(
+                psql_scalar "
+                    SELECT COUNT(*)
+                    FROM dead_letter_events
+                    WHERE kafka_topic = 'ecommerce.order_created.v2'
+                      AND event_payload IS NULL
+                      AND error_message LIKE
+                            'Message is not valid Avro:%'
+                      AND load_dttm >=
+                            '${E2E_STARTED_AT}'::timestamptz;
+                "
+            )"
+        else
+            rows_count="$(
+                psql_scalar "
+                    SELECT COUNT(*)
+                    FROM dead_letter_events
+                    WHERE event_payload ->> 'order_id'
+                        = '${INVALID_ORDER_ID}';
+                "
+            )"
+        fi
 
         if [[ "${rows_count}" -ge 1 ]]; then
             echo "Found ${INVALID_ORDER_ID} in dead_letter_events"
@@ -115,6 +137,7 @@ wait_for_dlq_event() {
 echo "========================================"
 echo "E2E smoke test"
 echo "Order ID: ${ORDER_ID}"
+echo "Serialization: ${EVENT_SERIALIZATION}"
 echo "========================================"
 
 echo
@@ -129,20 +152,33 @@ echo "Infrastructure is running"
 echo
 echo "[2/8] Producing order_created"
 
-make produce-created ORDER_ID="${ORDER_ID}"
+make produce-created \
+    ORDER_ID="${ORDER_ID}" \
+    SERIALIZATION="${EVENT_SERIALIZATION}"
 
 echo
 echo "[3/8] Producing order_paid"
 
-make produce-paid ORDER_ID="${ORDER_ID}"
+make produce-paid \
+    ORDER_ID="${ORDER_ID}" \
+    SERIALIZATION="${EVENT_SERIALIZATION}"
 
 echo
 echo "[4/8] Producing invalid order_created"
 
-.venv/bin/python src/producer.py \
-    --event order_created \
-    --order-id "${INVALID_ORDER_ID}" \
-    --invalid
+if [[ "${EVENT_SERIALIZATION}" == "avro" ]]; then
+    .venv/bin/python src/producer.py \
+        --event order_created \
+        --order-id "${INVALID_ORDER_ID}" \
+        --serialization avro \
+        --corrupt-avro
+else
+    .venv/bin/python src/producer.py \
+        --event order_created \
+        --order-id "${INVALID_ORDER_ID}" \
+        --serialization json \
+        --invalid
+fi
 
 echo
 echo "[5/8] Waiting for RAW and DLQ events"
@@ -186,18 +222,37 @@ if [[ "${paid_raw_provenance_count}" -ne 1 ]]; then
     exit 1
 fi
 
-valid_dlq_provenance_count="$(
-    psql_scalar "
-        SELECT COUNT(*)
-        FROM dead_letter_events
-        WHERE event_payload ->> 'order_id' = '${INVALID_ORDER_ID}'
-          AND contract_name = 'order_created'
-          AND contract_version = 2
-          AND raw_payload IS NOT NULL
-          AND convert_from(raw_payload, 'UTF8')::jsonb
-                ->> 'order_id' = '${INVALID_ORDER_ID}';
-    "
-)"
+if [[ "${EVENT_SERIALIZATION}" == "avro" ]]; then
+    valid_dlq_provenance_count="$(
+        psql_scalar "
+            SELECT COUNT(*)
+            FROM dead_letter_events
+            WHERE kafka_topic = 'ecommerce.order_created.v2'
+              AND contract_name = 'order_created'
+              AND contract_version = 2
+              AND event_payload IS NULL
+              AND raw_payload IS NOT NULL
+              AND get_byte(raw_payload, 0) = 0
+              AND error_message LIKE
+                    'Message is not valid Avro:%'
+              AND load_dttm >=
+                    '${E2E_STARTED_AT}'::timestamptz;
+        "
+    )"
+else
+    valid_dlq_provenance_count="$(
+        psql_scalar "
+            SELECT COUNT(*)
+            FROM dead_letter_events
+            WHERE event_payload ->> 'order_id' = '${INVALID_ORDER_ID}'
+              AND contract_name = 'order_created'
+              AND contract_version = 2
+              AND raw_payload IS NOT NULL
+              AND convert_from(raw_payload, 'UTF8')::jsonb
+                    ->> 'order_id' = '${INVALID_ORDER_ID}';
+        "
+    )"
+fi
 
 if [[ "${valid_dlq_provenance_count}" -ne 1 ]]; then
     echo "ERROR: DLQ provenance or raw payload is invalid"

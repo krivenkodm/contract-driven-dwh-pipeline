@@ -1,0 +1,36 @@
+{
+  "type": "record",
+  "name": "order_cancelled",
+  "namespace": "io.contract_dwh.events",
+  "doc": "Generated from order_cancelled contract v1; owner=orders-team",
+  "fields": [
+    {
+      "name": "order_id",
+      "type": "string"
+    },
+    {
+      "name": "cancellation_id",
+      "type": "string"
+    },
+    {
+      "name": "cancellation_reason",
+      "type": {
+        "type": "enum",
+        "name": "cancellation_reason_enum",
+        "symbols": [
+          "customer_request",
+          "payment_failed",
+          "out_of_stock",
+          "fraud_rejected"
+        ]
+      }
+    },
+    {
+      "name": "cancelled_at",
+      "type": {
+        "type": "long",
+        "logicalType": "timestamp-micros"
+      }
+    }
+  ]
+}

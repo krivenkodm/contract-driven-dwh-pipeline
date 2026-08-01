@@ -2,10 +2,11 @@
 
 Demo project showing how **data contracts** can drive a DWH ingestion pipeline from Kafka-compatible streaming to analytical marts.
 
-The project uses **Redpanda** as a lightweight Kafka-compatible broker for local development.
+The project uses **Redpanda** as a lightweight Kafka-compatible broker and
+Schema Registry for local development.
 
 ```text
-Data Contract → Kafka-compatible Topic → Validation → RAW → dbt → DDS → Mart
+YAML Contract → Avro Schema Registry → Kafka Topic → RAW → dbt → DDS → Mart
 ```
 
 ---
@@ -28,6 +29,8 @@ A data contract defines:
 The pipeline uses this contract to:
 
 * generate raw DWH table DDL
+* generate and register Avro schemas
+* enforce backward schema compatibility in Redpanda Schema Registry
 * validate incoming events
 * load valid events into the raw layer
 * save invalid events into a dead-letter table
@@ -44,8 +47,19 @@ The pipeline uses this contract to:
 ┌─────────────────┐
 │ Data Contract   │
 │ YAML            │
+└───────┬─────────┘
+        ├──────────────> RAW DDL generator
+        │
+        v
+┌─────────────────┐
+│ Avro generator  │
 └────────┬────────┘
-         │
+         v
+┌────────────────────────┐
+│ Redpanda               │
+│ Schema Registry        │
+└────────┬───────────────┘
+         │ governed schema ID
          v
 ┌─────────────────┐
 │ Producer        │
@@ -94,7 +108,8 @@ The pipeline uses this contract to:
 ## 3. Tech Stack
 
 * Python
-* Redpanda as a Kafka-compatible broker
+* Redpanda as a Kafka-compatible broker and Schema Registry
+* Apache Avro with Confluent wire framing
 * PostgreSQL as a demo DWH
 * YAML data contracts
 * Docker Compose
@@ -118,7 +133,13 @@ contract-driven-dwh-pipeline/
 │   ├── order_paid.v1.yaml
 │   └── order_cancelled.v1.yaml
 │
+├── schemas/avro/
+│   └── generated *.avsc schemas
+│
 ├── src/
+│   ├── avro_schema.py
+│   ├── avro_codec.py
+│   ├── schema_registry_manager.py
 │   ├── contract_registry.py
 │   ├── compatibility_checker.py
 │   ├── ddl_generator.py
@@ -377,10 +398,11 @@ CREATE TABLE IF NOT EXISTS dead_letter_events (
 );
 ```
 
-`raw_payload` preserves the bytes received from Kafka, including malformed JSON
-or invalid UTF-8. It is `NULL` for a Kafka tombstone or a legacy row created
-before byte retention was introduced. `event_payload` contains parsed JSON when
-parsing succeeded. The Kafka coordinates make DLQ insertion idempotent.
+`raw_payload` preserves the bytes received from Kafka, including malformed JSON,
+invalid UTF-8, or a corrupt Avro frame. It is `NULL` for a Kafka tombstone or a
+legacy row created before byte retention was introduced. `event_payload`
+contains the decoded object when parsing succeeded. The Kafka coordinates make
+DLQ insertion idempotent.
 
 ---
 
@@ -411,10 +433,36 @@ Bootstrap infrastructure, topics and database objects:
 make bootstrap
 ```
 
+Bootstrap also generates `schemas/avro/*.avsc`, starts Redpanda Schema Registry
+on `http://localhost:18081`, applies `BACKWARD` compatibility per subject, and
+registers every contract version before the consumer starts. Producer-side
+automatic registration is disabled by default, so an ungoverned schema cannot
+be published accidentally.
+
 Produce a set of demo events:
 
 ```bash
 make demo
+```
+
+JSON remains the default wire format during the transition. Produce a governed
+Avro event explicitly:
+
+```bash
+make produce-avro ORDER_ID=ord_avro_1
+make produce-created \
+    ORDER_ID=ord_avro_2 \
+    VERSION=2 \
+    SOURCE_CHANNEL=mobile_app \
+    SERIALIZATION=avro
+```
+
+The consumer detects Confluent-framed Avro by its magic byte and continues to
+accept retained JSON events, so Kafka replay remains backward compatible.
+Inspect the registered subjects, versions, compatibility mode, and schema IDs:
+
+```bash
+make schema-registry-check
 ```
 
 Build the primary dbt analytics layer:
@@ -438,7 +486,11 @@ Run the end-to-end smoke test against the running stack:
 
 ```bash
 make e2e
+make e2e-avro
 ```
+
+`make e2e-avro` verifies Avro serialization, schema-ID lookup, RAW loading,
+dbt DDS/MART output, and routing of an unknown-schema Avro frame to DLQ.
 
 Run unit tests and contract compatibility checks:
 
@@ -461,11 +513,12 @@ Run the same complete sequence used by CI:
 make ci
 ```
 
-The CI workflow validates contracts, parses the dbt project, runs Python unit
-tests, tests fresh and populated database migrations, exercises dbt
-incrementality and parity, starts the full Redpanda/PostgreSQL stack, and
-executes the RAW → DDS → MART smoke test. Docker status and logs are uploaded
-as an artifact when a job fails.
+The CI workflow validates contracts and generated Avro artifacts, parses the
+dbt project, runs Python unit tests, tests fresh and populated database
+migrations, exercises dbt incrementality and parity, starts the full
+Redpanda/PostgreSQL stack, and executes both JSON and Avro RAW → DDS → MART
+smoke tests. Docker status and logs are uploaded as an artifact when a job
+fails.
 
 Inspect the result:
 
@@ -652,6 +705,19 @@ breaking transition. A genuinely breaking event shape should use a new event
 name/topic and be migrated explicitly instead of being presented as backward
 compatible.
 
+The same chain is registered under a stable Avro record subject. For example,
+both versioned topics `ecommerce.order_created.v1` and
+`ecommerce.order_created.v2` use:
+
+```text
+io.contract_dwh.events.order_created
+```
+
+This is deliberate: using the default topic-based subject strategy would put
+each versioned topic in an isolated subject and Registry would have nothing to
+compare. The generated nullable `source_channel` field gets an Avro `null`
+default, so Registry accepts the v1 → v2 transition as backward compatible.
+
 ---
 
 ## 16. Data Quality Checks
@@ -706,6 +772,9 @@ This project demonstrates practical knowledge of:
 * schema validation
 * formal contract meta-schema and semantic validation
 * backward compatibility checks
+* deterministic Avro schema generation
+* governed Redpanda Schema Registry subjects and schema IDs
+* dual JSON/Avro ingestion with Confluent wire framing
 * DDL generation
 * contract provenance and payload retention in RAW/DLQ
 * dead-letter handling
@@ -728,18 +797,18 @@ This project demonstrates practical knowledge of:
 ## 18. Resume Description
 
 Built a contract-driven DWH ingestion pipeline using Python, PostgreSQL,
-Kafka-compatible streaming with Redpanda, and dbt. Implemented automatic RAW
-DDL generation, event validation, dead-letter handling, idempotent ingestion,
-incremental DDS and marts, historical snapshots, parity checks, database
-integration tests, source freshness monitoring, scheduled dbt execution,
-persistent run observability, governed operational metrics, a provisioned
-Grafana dashboard with alerting, and end-to-end CI.
+Kafka-compatible streaming with Redpanda, Schema Registry, Avro, and dbt.
+Implemented automatic RAW DDL and Avro schema generation, governed backward
+compatibility, dual JSON/Avro ingestion, dead-letter handling, idempotent
+loading, incremental DDS and marts, historical snapshots, parity checks,
+database integration tests, source freshness monitoring, scheduled dbt
+execution, persistent run observability, governed operational metrics, a
+provisioned Grafana dashboard with alerting, and end-to-end CI.
 
 ---
 
 ## 19. Future Improvements
 
-* add Schema Registry with Avro or Protobuf serialization
 * integrate a production orchestrator such as Airflow or Dagster
 * add historical DDS loading
 * replace the demo event heartbeat with a dedicated ingestion heartbeat

@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import struct
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -9,6 +10,7 @@ from uuid import uuid4
 from confluent_kafka import Message, Producer
 from dotenv import load_dotenv
 
+from avro_codec import serialize_avro_event
 from contract_registry import (
     get_contract,
     load_contracts,
@@ -18,6 +20,9 @@ from validator import validate_event
 
 Contract = dict[str, Any]
 EventBuilder = Callable[[str], dict[str, Any]]
+
+SUPPORTED_SERIALIZATIONS = ("json", "avro")
+CORRUPT_SCHEMA_ID = 2_147_483_647
 
 
 def current_timestamp() -> str:
@@ -155,6 +160,20 @@ def delivery_callback(
     )
 
 
+def _environment_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+
+    if value is None:
+        return default
+
+    return value.strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def main() -> None:
     load_dotenv()
 
@@ -215,7 +234,46 @@ def main() -> None:
         help="Send an intentionally invalid event",
     )
 
+    parser.add_argument(
+        "--serialization",
+        choices=SUPPORTED_SERIALIZATIONS,
+        default=os.getenv(
+            "EVENT_SERIALIZATION",
+            "json",
+        ).lower(),
+        help=(
+            "Wire format. EVENT_SERIALIZATION is used "
+            "when the argument is omitted"
+        ),
+    )
+
+    parser.add_argument(
+        "--corrupt-avro",
+        action="store_true",
+        help=(
+            "Send an Avro frame with an unknown schema ID "
+            "for DLQ testing"
+        ),
+    )
+
     args = parser.parse_args()
+
+    if args.invalid and args.serialization == "avro":
+        raise ValueError(
+            "--invalid is available only for JSON because "
+            "Avro rejects schema-invalid values before publish; "
+            "use --corrupt-avro to test the Avro DLQ path"
+        )
+
+    if args.corrupt_avro and args.serialization != "avro":
+        raise ValueError(
+            "--corrupt-avro requires --serialization avro"
+        )
+
+    if args.invalid and args.corrupt_avro:
+        raise ValueError(
+            "--invalid and --corrupt-avro are mutually exclusive"
+        )
 
     try:
         contract = get_contract(
@@ -318,7 +376,8 @@ def main() -> None:
         "Producing event: "
         f"name={contract['name']}, "
         f"version={contract['version']}, "
-        f"topic={contract['topic']}"
+        f"topic={contract['topic']}, "
+        f"serialization={args.serialization}"
     )
 
     print(
@@ -329,13 +388,35 @@ def main() -> None:
         )
     )
 
+    if args.serialization == "avro":
+        if args.corrupt_avro:
+            message_value = struct.pack(
+                ">bI",
+                0,
+                CORRUPT_SCHEMA_ID,
+            ) + b"\x00"
+        else:
+            message_value = serialize_avro_event(
+                event=event,
+                contract=contract,
+                registry_url=os.getenv(
+                    "SCHEMA_REGISTRY_URL",
+                    "http://localhost:18081",
+                ),
+                auto_register_schemas=_environment_flag(
+                    "SCHEMA_REGISTRY_AUTO_REGISTER",
+                ),
+            )
+    else:
+        message_value = json.dumps(
+            event,
+            ensure_ascii=False,
+        ).encode("utf-8")
+
     producer.produce(
         topic=contract["topic"],
         key=message_key.encode("utf-8"),
-        value=json.dumps(
-            event,
-            ensure_ascii=False,
-        ).encode("utf-8"),
+        value=message_value,
         callback=delivery_callback,
     )
 
