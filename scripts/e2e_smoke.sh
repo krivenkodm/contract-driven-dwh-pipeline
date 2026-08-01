@@ -131,6 +131,30 @@ fi
 
 echo "Found ${ORDER_ID} in dds_orders"
 
+valid_dds_state_count="$(
+    psql_scalar "
+        SELECT COUNT(*)
+        FROM dds_orders
+        WHERE order_id = '${ORDER_ID}'
+          AND status = 'paid'
+          AND payment_currency = currency
+          AND dq_multiple_payments_flg = FALSE
+          AND dq_multiple_cancellations_flg = FALSE
+          AND dq_payment_amount_mismatch_flg = FALSE
+          AND dq_payment_currency_mismatch_flg = FALSE
+          AND dq_payment_before_creation_flg = FALSE
+          AND dq_cancellation_before_creation_flg = FALSE
+          AND dq_payment_after_cancellation_flg = FALSE;
+    "
+)"
+
+if [[ "${valid_dds_state_count}" -ne 1 ]]; then
+    echo "ERROR: ${ORDER_ID} has unexpected DDS or DQ state"
+    exit 1
+fi
+
+echo "DDS status and DQ flags are valid"
+
 mart_rows_count="$(
     psql_scalar "
         SELECT COUNT(*)

@@ -187,19 +187,19 @@ consume-once:
 
 
 build-dds: migrate
-	docker exec -i contract_dwh_postgres \
+	docker exec -i $(POSTGRES_CONTAINER) \
 		psql \
-		-U dwh \
-		-d dwh \
+		-U $(POSTGRES_USER) \
+		-d $(POSTGRES_DB) \
 		-v ON_ERROR_STOP=1 \
 		< sql/dds/orders.sql
 
 
 build-mart: migrate
-	docker exec -i contract_dwh_postgres \
+	docker exec -i $(POSTGRES_CONTAINER) \
 		psql \
-		-U dwh \
-		-d dwh \
+		-U $(POSTGRES_USER) \
+		-d $(POSTGRES_DB) \
 		-v ON_ERROR_STOP=1 \
 		< sql/mart/daily_orders.sql
 
@@ -223,6 +223,8 @@ rebuild-from-kafka:
 		-c "TRUNCATE \
 			mart_daily_orders, \
 			mart_watermarks, \
+			dds_orders_changes, \
+			dq_orphan_order_events, \
 			dds_orders, \
 			etl_watermarks, \
 			raw_order_created, \
@@ -267,4 +269,7 @@ e2e:
 	./scripts/e2e_smoke.sh
 
 migrate: init-raw
+	POSTGRES_CONTAINER=$(POSTGRES_CONTAINER) \
+	POSTGRES_USER=$(POSTGRES_USER) \
+	POSTGRES_DB=$(POSTGRES_DB) \
 	./scripts/migrate.sh

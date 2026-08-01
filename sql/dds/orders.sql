@@ -1,6 +1,9 @@
 BEGIN;
 
 
+SET LOCAL TIME ZONE 'UTC';
+
+
 SELECT pg_advisory_xact_lock(
     hashtextextended('dds_orders', 0)
 );
@@ -181,7 +184,25 @@ payments_ranked AS (
 
         COUNT(*) OVER (
             PARTITION BY r.order_id
-        ) AS payments_cnt
+        ) AS payments_cnt,
+
+        BOOL_OR(
+            r.paid_amount <> cr.amount
+        ) OVER (
+            PARTITION BY r.order_id
+        ) AS dq_payment_amount_mismatch_flg,
+
+        BOOL_OR(
+            r.currency <> cr.currency
+        ) OVER (
+            PARTITION BY r.order_id
+        ) AS dq_payment_currency_mismatch_flg,
+
+        BOOL_OR(
+            r.paid_at < cr.created_at
+        ) OVER (
+            PARTITION BY r.order_id
+        ) AS dq_payment_before_creation_flg
 
     FROM raw_order_paid r
 
@@ -190,6 +211,9 @@ payments_ranked AS (
 
     INNER JOIN tmp_dds_orders_high_watermarks h
         ON h.source_table = 'raw_order_paid'
+
+    INNER JOIN created cr
+        ON cr.order_id = r.order_id
 
     WHERE
         r.raw_id <= h.high_raw_id
@@ -222,7 +246,17 @@ cancellations_ranked AS (
 
         COUNT(*) OVER (
             PARTITION BY r.order_id
-        ) AS cancellations_cnt
+        ) AS cancellations_cnt,
+
+        MIN(r.cancelled_at) OVER (
+            PARTITION BY r.order_id
+        ) AS first_cancelled_at,
+
+        BOOL_OR(
+            r.cancelled_at < cr.created_at
+        ) OVER (
+            PARTITION BY r.order_id
+        ) AS dq_cancellation_before_creation_flg
 
     FROM raw_order_cancelled r
 
@@ -231,6 +265,9 @@ cancellations_ranked AS (
 
     INNER JOIN tmp_dds_orders_high_watermarks h
         ON h.source_table = 'raw_order_cancelled'
+
+    INNER JOIN created cr
+        ON cr.order_id = r.order_id
 
     WHERE
         r.raw_id <= h.high_raw_id
@@ -256,24 +293,18 @@ prepared_orders AS (
         cr.created_at,
 
         CASE
-            WHEN p.paid_at IS NULL
-             AND ca.cancelled_at IS NULL
-                THEN 'created'
+            WHEN ca.cancelled_at IS NOT NULL
+                THEN 'cancelled'
 
-            WHEN ca.cancelled_at IS NULL
+            WHEN p.paid_at IS NOT NULL
                 THEN 'paid'
 
-            WHEN p.paid_at IS NULL
-                THEN 'cancelled'
-
-            WHEN ca.cancelled_at >= p.paid_at
-                THEN 'cancelled'
-
-            ELSE 'paid'
+            ELSE 'created'
         END AS status,
 
         p.payment_id,
         p.paid_amount,
+        p.currency AS payment_currency,
         p.paid_at,
 
         ca.cancellation_id,
@@ -305,6 +336,32 @@ prepared_orders AS (
             0
         ) > 1 AS dq_multiple_cancellations_flg,
 
+        COALESCE(
+            p.dq_payment_amount_mismatch_flg,
+            FALSE
+        ) AS dq_payment_amount_mismatch_flg,
+
+        COALESCE(
+            p.dq_payment_currency_mismatch_flg,
+            FALSE
+        ) AS dq_payment_currency_mismatch_flg,
+
+        COALESCE(
+            p.dq_payment_before_creation_flg,
+            FALSE
+        ) AS dq_payment_before_creation_flg,
+
+        COALESCE(
+            ca.dq_cancellation_before_creation_flg,
+            FALSE
+        ) AS dq_cancellation_before_creation_flg,
+
+        (
+            p.paid_at IS NOT NULL
+            AND ca.first_cancelled_at IS NOT NULL
+            AND p.paid_at > ca.first_cancelled_at
+        ) AS dq_payment_after_cancellation_flg,
+
         CURRENT_TIMESTAMP AS processed_dttm
 
     FROM created cr
@@ -327,6 +384,7 @@ INSERT INTO dds_orders (
     status,
     payment_id,
     paid_amount,
+    payment_currency,
     paid_at,
     cancellation_id,
     cancellation_reason,
@@ -336,6 +394,11 @@ INSERT INTO dds_orders (
     duplicate_created_events_cnt,
     dq_multiple_payments_flg,
     dq_multiple_cancellations_flg,
+    dq_payment_amount_mismatch_flg,
+    dq_payment_currency_mismatch_flg,
+    dq_payment_before_creation_flg,
+    dq_cancellation_before_creation_flg,
+    dq_payment_after_cancellation_flg,
     processed_dttm
 )
 
@@ -349,6 +412,7 @@ SELECT
     status,
     payment_id,
     paid_amount,
+    payment_currency,
     paid_at,
     cancellation_id,
     cancellation_reason,
@@ -358,6 +422,11 @@ SELECT
     duplicate_created_events_cnt,
     dq_multiple_payments_flg,
     dq_multiple_cancellations_flg,
+    dq_payment_amount_mismatch_flg,
+    dq_payment_currency_mismatch_flg,
+    dq_payment_before_creation_flg,
+    dq_cancellation_before_creation_flg,
+    dq_payment_after_cancellation_flg,
     processed_dttm
 
 FROM prepared_orders
@@ -391,6 +460,9 @@ DO UPDATE SET
     paid_amount =
         EXCLUDED.paid_amount,
 
+    payment_currency =
+        EXCLUDED.payment_currency,
+
     paid_at =
         EXCLUDED.paid_at,
 
@@ -418,8 +490,117 @@ DO UPDATE SET
     dq_multiple_cancellations_flg =
         EXCLUDED.dq_multiple_cancellations_flg,
 
+    dq_payment_amount_mismatch_flg =
+        EXCLUDED.dq_payment_amount_mismatch_flg,
+
+    dq_payment_currency_mismatch_flg =
+        EXCLUDED.dq_payment_currency_mismatch_flg,
+
+    dq_payment_before_creation_flg =
+        EXCLUDED.dq_payment_before_creation_flg,
+
+    dq_cancellation_before_creation_flg =
+        EXCLUDED.dq_cancellation_before_creation_flg,
+
+    dq_payment_after_cancellation_flg =
+        EXCLUDED.dq_payment_after_cancellation_flg,
+
     processed_dttm =
         EXCLUDED.processed_dttm;
+
+
+DELETE FROM dq_orphan_order_events q
+USING tmp_dds_orders_affected a
+WHERE
+    q.order_id = a.order_id;
+
+
+WITH orphan_events AS (
+    SELECT
+        r.order_id,
+        'payment'::varchar AS event_type,
+        r.paid_at AS event_at
+
+    FROM raw_order_paid r
+
+    INNER JOIN tmp_dds_orders_affected a
+        ON a.order_id = r.order_id
+
+    INNER JOIN tmp_dds_orders_high_watermarks h
+        ON h.source_table = 'raw_order_paid'
+
+    WHERE
+        r.raw_id <= h.high_raw_id
+
+    UNION ALL
+
+    SELECT
+        r.order_id,
+        'cancellation'::varchar AS event_type,
+        r.cancelled_at AS event_at
+
+    FROM raw_order_cancelled r
+
+    INNER JOIN tmp_dds_orders_affected a
+        ON a.order_id = r.order_id
+
+    INNER JOIN tmp_dds_orders_high_watermarks h
+        ON h.source_table = 'raw_order_cancelled'
+
+    WHERE
+        r.raw_id <= h.high_raw_id
+),
+
+created_order_ids AS (
+    SELECT DISTINCT
+        r.order_id
+
+    FROM raw_order_created r
+
+    INNER JOIN tmp_dds_orders_affected a
+        ON a.order_id = r.order_id
+
+    INNER JOIN tmp_dds_orders_high_watermarks h
+        ON h.source_table = 'raw_order_created'
+
+    WHERE
+        r.raw_id <= h.high_raw_id
+)
+
+INSERT INTO dq_orphan_order_events (
+    order_id,
+    payments_cnt,
+    cancellations_cnt,
+    first_event_at,
+    last_event_at,
+    processed_dttm
+)
+
+SELECT
+    e.order_id,
+
+    COUNT(*) FILTER (
+        WHERE e.event_type = 'payment'
+    )::integer AS payments_cnt,
+
+    COUNT(*) FILTER (
+        WHERE e.event_type = 'cancellation'
+    )::integer AS cancellations_cnt,
+
+    MIN(e.event_at) AS first_event_at,
+    MAX(e.event_at) AS last_event_at,
+    CURRENT_TIMESTAMP AS processed_dttm
+
+FROM orphan_events e
+
+LEFT JOIN created_order_ids c
+    ON c.order_id = e.order_id
+
+WHERE
+    c.order_id IS NULL
+
+GROUP BY
+    e.order_id;
 
 
 INSERT INTO etl_watermarks (

@@ -1,6 +1,9 @@
 BEGIN;
 
 
+SET LOCAL TIME ZONE 'UTC';
+
+
 SELECT pg_advisory_xact_lock(
     hashtextextended('mart_daily_orders', 0)
 );
@@ -11,40 +14,78 @@ ON COMMIT DROP
 AS
 SELECT
     COALESCE(
-        MAX(dds_change_id),
+        MAX(change_id),
         0
-    )::bigint AS high_dds_change_id
+    )::bigint AS high_change_id,
 
-FROM dds_orders;
+    COALESCE(
+        (
+            SELECT
+                last_change_id
+
+            FROM mart_watermarks
+
+            WHERE
+                pipeline_name = 'mart_daily_orders'
+        ),
+        0
+    )::bigint AS last_change_id
+
+FROM dds_orders_changes;
 
 
 CREATE TEMP TABLE tmp_mart_daily_orders_affected_dates
 ON COMMIT DROP
 AS
-SELECT DISTINCT
-    d.created_at::date AS order_dt
+SELECT
+    c.old_order_dt AS order_dt
 
-FROM dds_orders d
+FROM dds_orders_changes c
 
 CROSS JOIN tmp_mart_daily_orders_high_watermark h
 
-LEFT JOIN mart_watermarks w
-    ON w.pipeline_name = 'mart_daily_orders'
+WHERE
+    c.change_id > h.last_change_id
+    AND c.change_id <= h.high_change_id
+    AND c.old_order_dt IS NOT NULL
+
+UNION
+
+SELECT
+    c.new_order_dt AS order_dt
+
+FROM dds_orders_changes c
+
+CROSS JOIN tmp_mart_daily_orders_high_watermark h
 
 WHERE
-    d.dds_change_id > COALESCE(
-        w.last_dds_change_id,
-        0
-    )
+    c.change_id > h.last_change_id
+    AND c.change_id <= h.high_change_id
+    AND c.new_order_dt IS NOT NULL
 
-    AND d.dds_change_id <=
-        h.high_dds_change_id;
+UNION
+
+SELECT
+    m.order_dt
+
+FROM mart_daily_orders m
+
+CROSS JOIN tmp_mart_daily_orders_high_watermark h
+
+WHERE
+    h.last_change_id = 0;
 
 
 SELECT
     COUNT(*) AS affected_order_dates_cnt
 
 FROM tmp_mart_daily_orders_affected_dates;
+
+
+DELETE FROM mart_daily_orders m
+USING tmp_mart_daily_orders_affected_dates a
+WHERE
+    m.order_dt = a.order_dt;
 
 
 WITH aggregated_dates AS (
@@ -85,6 +126,11 @@ WITH aggregated_dates AS (
                 d.duplicate_created_events_cnt > 0
                 OR d.dq_multiple_payments_flg
                 OR d.dq_multiple_cancellations_flg
+                OR d.dq_payment_amount_mismatch_flg
+                OR d.dq_payment_currency_mismatch_flg
+                OR d.dq_payment_before_creation_flg
+                OR d.dq_cancellation_before_creation_flg
+                OR d.dq_payment_after_cancellation_flg
         )::integer AS orders_with_dq_cnt,
 
         CURRENT_TIMESTAMP AS processed_dttm
@@ -121,53 +167,27 @@ SELECT
     orders_with_dq_cnt,
     processed_dttm
 
-FROM aggregated_dates
-
-ON CONFLICT (order_dt)
-DO UPDATE SET
-    created_orders_cnt =
-        EXCLUDED.created_orders_cnt,
-
-    paid_orders_cnt =
-        EXCLUDED.paid_orders_cnt,
-
-    cancelled_orders_cnt =
-        EXCLUDED.cancelled_orders_cnt,
-
-    created_status_orders_cnt =
-        EXCLUDED.created_status_orders_cnt,
-
-    gross_order_amount =
-        EXCLUDED.gross_order_amount,
-
-    paid_revenue =
-        EXCLUDED.paid_revenue,
-
-    orders_with_dq_cnt =
-        EXCLUDED.orders_with_dq_cnt,
-
-    processed_dttm =
-        EXCLUDED.processed_dttm;
+FROM aggregated_dates;
 
 
 INSERT INTO mart_watermarks (
     pipeline_name,
-    last_dds_change_id,
+    last_change_id,
     processed_dttm
 )
 
 SELECT
     'mart_daily_orders',
-    high_dds_change_id,
+    high_change_id,
     CURRENT_TIMESTAMP
 
 FROM tmp_mart_daily_orders_high_watermark
 
 ON CONFLICT (pipeline_name)
 DO UPDATE SET
-    last_dds_change_id = GREATEST(
-        mart_watermarks.last_dds_change_id,
-        EXCLUDED.last_dds_change_id
+    last_change_id = GREATEST(
+        mart_watermarks.last_change_id,
+        EXCLUDED.last_change_id
     ),
 
     processed_dttm =

@@ -289,6 +289,11 @@ paid_revenue
 orders_with_dq_cnt
 ```
 
+Incremental mart loading is driven by `dds_orders_changes`. Each DDS upsert
+records both `old_order_dt` and `new_order_dt`. The mart deletes every affected
+date before rebuilding it, so a late event that moves the order to another day
+cannot leave a stale aggregate behind.
+
 ---
 
 ## 9. Dead Letter Handling
@@ -429,20 +434,41 @@ order_created.v2.yaml
 ## 14. Data Quality Checks
 
 The current pipeline validates required fields, types, enums and timestamp
-timezones before RAW insertion. DDS also exposes duplicate-event indicators:
+timezones before RAW insertion. DDS also exposes business data quality flags:
 
 ```text
 duplicate_created_events_cnt
 dq_multiple_payments_flg
 dq_multiple_cancellations_flg
+dq_payment_amount_mismatch_flg
+dq_payment_currency_mismatch_flg
+dq_payment_before_creation_flg
+dq_cancellation_before_creation_flg
+dq_payment_after_cancellation_flg
 ```
+
+Payments and cancellations without a matching `order_created` are exposed in
+`dq_orphan_order_events`.
+
+### Order status rules
+
+`dds_orders.status` follows deterministic lifecycle precedence:
+
+1. `cancelled` if at least one cancellation exists;
+2. otherwise `paid` if at least one payment exists;
+3. otherwise `created`.
+
+Cancellation is terminal. A payment received after cancellation does not move
+the order back to `paid`; it sets `dq_payment_after_cancellation_flg` instead.
+The earliest creation event defines the order attributes, while the latest
+payment and cancellation events provide their respective details.
 
 Further useful checks:
 
 * amount is non-negative
-* payment amount and currency match the order
-* lifecycle timestamps are consistent
-* orphan payment and cancellation events are monitored
+* refund amounts do not exceed captured payments
+* business-key duplicates follow an explicit resolution policy
+* RAW, DDS and MART freshness stay within their SLA
 
 ---
 
@@ -473,7 +499,6 @@ Built a contract-driven DWH ingestion pipeline using Python, PostgreSQL and Kafk
 
 * add a formal contract meta-schema
 * preserve the original Kafka payload and headers in RAW/DLQ
-* fix old/new date tracking for incremental mart rebuilds
 * add database-backed integration tests and CI
 * add Schema Registry with Avro or Protobuf serialization
 * move transformations to dbt and add orchestration
