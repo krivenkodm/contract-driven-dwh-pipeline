@@ -36,7 +36,8 @@ POSTGRES_DB := dwh
 	rebuild-from-kafka \
 	test \
 	demo \
-	e2e
+	e2e \
+	migrate
 
 
 up:
@@ -101,6 +102,7 @@ init-db: generate-ddl
 				< "$$file"; \
 		fi; \
 	done
+	$(MAKE) migrate
 
 
 create-topics:
@@ -147,20 +149,20 @@ consume-once:
 	$(PYTHON) src/consumer.py --once
 
 
-build-dds:
-	docker exec -i $(POSTGRES_CONTAINER) \
+build-dds: migrate
+	docker exec -i contract_dwh_postgres \
 		psql \
-		-U $(POSTGRES_USER) \
-		-d $(POSTGRES_DB) \
+		-U dwh \
+		-d dwh \
 		-v ON_ERROR_STOP=1 \
 		< sql/dds/orders.sql
 
 
-build-mart:
-	docker exec -i $(POSTGRES_CONTAINER) \
+build-mart: migrate
+	docker exec -i contract_dwh_postgres \
 		psql \
-		-U $(POSTGRES_USER) \
-		-d $(POSTGRES_DB) \
+		-U dwh \
+		-d dwh \
 		-v ON_ERROR_STOP=1 \
 		< sql/mart/daily_orders.sql
 
@@ -226,3 +228,6 @@ demo:
 
 e2e:
 	./scripts/e2e_smoke.sh
+
+migrate:
+	./scripts/migrate.sh

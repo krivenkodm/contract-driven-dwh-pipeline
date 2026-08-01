@@ -1,30 +1,6 @@
 BEGIN;
 
 
-CREATE TABLE IF NOT EXISTS mart_daily_orders (
-    order_dt date PRIMARY KEY,
-
-    created_orders_cnt integer NOT NULL,
-    paid_orders_cnt integer NOT NULL,
-    cancelled_orders_cnt integer NOT NULL,
-    created_status_orders_cnt integer NOT NULL,
-
-    gross_order_amount numeric(14, 2) NOT NULL,
-    paid_revenue numeric(14, 2) NOT NULL,
-
-    orders_with_dq_cnt integer NOT NULL,
-
-    processed_dttm timestamp NOT NULL
-);
-
-
-CREATE TABLE IF NOT EXISTS mart_watermarks (
-    pipeline_name varchar PRIMARY KEY,
-    last_dds_change_id bigint NOT NULL,
-    processed_dttm timestamp NOT NULL
-);
-
-
 SELECT pg_advisory_xact_lock(
     hashtextextended('mart_daily_orders', 0)
 );
@@ -38,6 +14,7 @@ SELECT
         MAX(dds_change_id),
         0
     )::bigint AS high_dds_change_id
+
 FROM dds_orders;
 
 
@@ -46,6 +23,7 @@ ON COMMIT DROP
 AS
 SELECT DISTINCT
     d.created_at::date AS order_dt
+
 FROM dds_orders d
 
 CROSS JOIN tmp_mart_daily_orders_high_watermark h
@@ -54,18 +32,18 @@ LEFT JOIN mart_watermarks w
     ON w.pipeline_name = 'mart_daily_orders'
 
 WHERE
-    d.dds_change_id
-        > COALESCE(
-            w.last_dds_change_id,
-            0
-        )
+    d.dds_change_id > COALESCE(
+        w.last_dds_change_id,
+        0
+    )
 
-    AND d.dds_change_id
-        <= h.high_dds_change_id;
+    AND d.dds_change_id <=
+        h.high_dds_change_id;
 
 
 SELECT
     COUNT(*) AS affected_order_dates_cnt
+
 FROM tmp_mart_daily_orders_affected_dates;
 
 
@@ -142,6 +120,7 @@ SELECT
     paid_revenue,
     orders_with_dq_cnt,
     processed_dttm
+
 FROM aggregated_dates
 
 ON CONFLICT (order_dt)
@@ -181,6 +160,7 @@ SELECT
     'mart_daily_orders',
     high_dds_change_id,
     CURRENT_TIMESTAMP
+
 FROM tmp_mart_daily_orders_high_watermark
 
 ON CONFLICT (pipeline_name)
