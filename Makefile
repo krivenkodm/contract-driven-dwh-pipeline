@@ -14,6 +14,17 @@ POSTGRES_DB := dwh
 
 INTEGRATION_POSTGRES_ADMIN_DSN ?= \
 	postgresql://dwh:dwh@localhost:55432/postgres
+ANALYTICS_POSTGRES_DSN ?= \
+	postgresql://dwh:dwh@localhost:55432/$(POSTGRES_DB)
+ANALYTICS_RUN_INTERVAL_SECONDS ?= 300
+ANALYTICS_TRIGGER ?= manual
+ANALYTICS_FAIL_ON_WARNING ?= 0
+ALERT_WEBHOOK_URL ?=
+GRAFANA_PORT ?= 3000
+GRAFANA_ADMIN_USER ?= admin
+GRAFANA_ADMIN_PASSWORD ?= admin
+GRAFANA_DB_USER ?= grafana_reader
+GRAFANA_DB_PASSWORD ?= grafana
 
 
 .PHONY: \
@@ -45,9 +56,24 @@ INTEGRATION_POSTGRES_ADMIN_DSN ?= \
 	dbt-debug \
 	dbt-parse \
 	dbt-build \
+	dbt-source-freshness \
 	dbt-parity \
 	verify-dbt-parity \
 	dbt-docs \
+	validate-monitoring-config \
+	analytics-run \
+	analytics-run-strict \
+	analytics-history \
+	orchestration-up \
+	orchestration-down \
+	orchestration-logs \
+	init-monitoring-reader \
+	monitoring-up \
+	monitoring-down \
+	monitoring-logs \
+	monitoring-status \
+	monitoring-health \
+	monitoring-check \
 	rebuild-from-kafka \
 	test \
 	test-unit \
@@ -258,6 +284,13 @@ dbt-build: migrate
 		--exclude tag:parity
 
 
+dbt-source-freshness: migrate
+	DBT_DATABASE=$(POSTGRES_DB) \
+	$(DBT) source freshness \
+		--project-dir $(DBT_PROJECT_DIR) \
+		--profiles-dir $(DBT_PROFILES_DIR)
+
+
 dbt-parity:
 	DBT_DATABASE=$(POSTGRES_DB) \
 	$(DBT) test \
@@ -279,8 +312,144 @@ dbt-docs: postgres-up
 		--profiles-dir $(DBT_PROFILES_DIR)
 
 
+validate-monitoring-config:
+	$(PYTHON) src/monitoring_config_checker.py
+
+
+analytics-run: migrate
+	POSTGRES_DSN=$(ANALYTICS_POSTGRES_DSN) \
+	DBT_DATABASE=$(POSTGRES_DB) \
+	ALERT_WEBHOOK_URL=$(ALERT_WEBHOOK_URL) \
+	$(PYTHON) src/analytics_runner.py \
+		--dbt-executable $(DBT) \
+		--project-dir $(DBT_PROJECT_DIR) \
+		--profiles-dir $(DBT_PROFILES_DIR) \
+		--trigger $(ANALYTICS_TRIGGER) $(if $(filter 1 true yes,$(ANALYTICS_FAIL_ON_WARNING)),--fail-on-warning,)
+
+
+analytics-run-strict:
+	$(MAKE) analytics-run ANALYTICS_FAIL_ON_WARNING=1
+
+
+analytics-history: migrate
+	docker exec -i $(POSTGRES_CONTAINER) \
+		psql \
+		-U $(POSTGRES_USER) \
+		-d $(POSTGRES_DB) \
+		-v ON_ERROR_STOP=1 \
+		-c "SELECT \
+			run_id, \
+			trigger_type, \
+			status, \
+			freshness_status, \
+			build_status, \
+			total_nodes, \
+			duration_seconds, \
+			started_at \
+		FROM analytics_run_history \
+		ORDER BY started_at DESC \
+		LIMIT 20;"
+
+
+orchestration-up: bootstrap
+	ANALYTICS_RUN_INTERVAL_SECONDS=$(ANALYTICS_RUN_INTERVAL_SECONDS) \
+	ALERT_WEBHOOK_URL=$(ALERT_WEBHOOK_URL) \
+	docker compose \
+		--profile orchestration \
+		up -d --build analytics-runner
+
+
+orchestration-down:
+	docker compose \
+		--profile orchestration \
+		stop analytics-runner
+
+
+orchestration-logs:
+	docker compose \
+		--profile orchestration \
+		logs -f analytics-runner
+
+
+init-monitoring-reader:
+	@docker exec \
+		-e GRAFANA_READER_USER="$(GRAFANA_DB_USER)" \
+		-e GRAFANA_READER_PASSWORD="$(GRAFANA_DB_PASSWORD)" \
+		-i $(POSTGRES_CONTAINER) \
+		psql \
+		-X \
+		-U $(POSTGRES_USER) \
+		-d $(POSTGRES_DB) \
+		-v ON_ERROR_STOP=1 \
+		< monitoring/grafana/init_reader.sql
+
+
+monitoring-up:
+	$(MAKE) bootstrap
+	$(MAKE) analytics-run
+	$(MAKE) init-monitoring-reader
+	@GRAFANA_PORT=$(GRAFANA_PORT) \
+	GRAFANA_ADMIN_USER=$(GRAFANA_ADMIN_USER) \
+	GRAFANA_ADMIN_PASSWORD=$(GRAFANA_ADMIN_PASSWORD) \
+	GRAFANA_DB_USER=$(GRAFANA_DB_USER) \
+	GRAFANA_DB_PASSWORD=$(GRAFANA_DB_PASSWORD) \
+	ANALYTICS_RUN_INTERVAL_SECONDS=$(ANALYTICS_RUN_INTERVAL_SECONDS) \
+	ALERT_WEBHOOK_URL=$(ALERT_WEBHOOK_URL) \
+	docker compose \
+		--profile orchestration \
+		--profile monitoring \
+		up -d --build analytics-runner grafana
+	@echo "Grafana dashboard: http://localhost:$(GRAFANA_PORT)/d/contract-dwh-operations"
+
+
+monitoring-down:
+	docker compose \
+		--profile orchestration \
+		--profile monitoring \
+		stop grafana analytics-runner
+
+
+monitoring-logs:
+	docker compose \
+		--profile orchestration \
+		--profile monitoring \
+		logs -f grafana analytics-runner
+
+
+monitoring-status:
+	docker compose \
+		--profile orchestration \
+		--profile monitoring \
+		ps
+
+
+monitoring-health:
+	docker exec -i $(POSTGRES_CONTAINER) \
+		psql \
+		-U $(POSTGRES_USER) \
+		-d $(POSTGRES_DB) \
+		-v ON_ERROR_STOP=1 \
+		-c "SELECT \
+			overall_health, \
+			health_reason, \
+			freshness_status, \
+			build_status, \
+			build_success_rate_24h, \
+			dead_letter_count_24h, \
+			dq_affected_orders, \
+			orphan_order_count \
+		FROM dbt_monitoring.monitor_pipeline_health;"
+
+
+monitoring-check:
+	@curl --fail --silent --show-error \
+		http://localhost:$(GRAFANA_PORT)/api/health
+	@echo
+	$(MAKE) monitoring-health
+
+
 build-analytics:
-	$(MAKE) dbt-build
+	$(MAKE) analytics-run
 
 
 rebuild-from-kafka:
@@ -334,6 +503,7 @@ test-integration: postgres-up
 
 ci:
 	$(MAKE) check-contracts
+	$(MAKE) validate-monitoring-config
 	$(MAKE) test-unit
 	$(MAKE) test-integration
 	$(MAKE) bootstrap

@@ -1,0 +1,91 @@
+version: 2
+
+models:
+  - name: monitor_pipeline_health
+    description: >-
+      One live operational health row combining dbt execution, RAW freshness,
+      dead-letter volume, and current DDS data-quality signals.
+    columns:
+      - name: observed_at
+        data_tests:
+          - not_null
+      - name: overall_health
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [healthy, warning, critical]
+      - name: health_code
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1, 2]
+      - name: run_count_24h
+        data_tests:
+          - not_null
+      - name: dead_letter_count_24h
+        data_tests:
+          - not_null
+      - name: dq_affected_orders
+        data_tests:
+          - not_null
+
+  - name: monitor_analytics_runs
+    description: One dashboard-ready row per observed dbt execution.
+    columns:
+      - name: run_id
+        data_tests:
+          - unique
+          - not_null
+      - name: started_at
+        data_tests:
+          - not_null
+
+  - name: monitor_raw_event_volume_hourly
+    description: Hourly RAW event volume by contract event type.
+    columns:
+      - name: event_hour
+        data_tests:
+          - not_null
+      - name: event_type
+        data_tests:
+          - not_null
+      - name: events_count
+        data_tests:
+          - not_null
+
+  - name: monitor_dead_letter_volume_hourly
+    description: Hourly count of rejected Kafka messages.
+    columns:
+      - name: event_hour
+        data_tests:
+          - not_null
+      - name: dead_letter_count
+        data_tests:
+          - not_null
+
+  - name: monitor_data_quality_issues
+    description: Current affected-order count for each DDS quality rule.
+    columns:
+      - name: issue_type
+        data_tests:
+          - unique
+          - not_null
+      - name: issue_label
+        data_tests:
+          - not_null
+      - name: affected_orders
+        data_tests:
+          - not_null
+
+  - name: monitor_recent_dead_letters
+    description: Safe diagnostic metadata for rejected messages, without payloads.
+    columns:
+      - name: id
+        data_tests:
+          - unique
+          - not_null
+      - name: load_dttm
+        data_tests:
+          - not_null

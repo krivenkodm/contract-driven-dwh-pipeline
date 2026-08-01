@@ -104,6 +104,80 @@ services:
     restart: unless-stopped
 
 
+  analytics-runner:
+    profiles:
+      - orchestration
+
+    build:
+      context: .
+      dockerfile: Dockerfile.analytics
+
+    container_name: contract_dwh_analytics_runner
+
+    command:
+      - python
+      - src/analytics_runner.py
+      - --trigger
+      - scheduled
+      - --interval-seconds
+      - "${ANALYTICS_RUN_INTERVAL_SECONDS:-300}"
+
+    environment:
+      POSTGRES_DSN: postgresql://dwh:dwh@postgres:5432/dwh
+      DBT_HOST: postgres
+      DBT_PORT: "5432"
+      DBT_USER: dwh
+      DBT_PASSWORD: dwh
+      DBT_DATABASE: dwh
+      DBT_SCHEMA: dbt
+      ALERT_WEBHOOK_URL: "${ALERT_WEBHOOK_URL:-}"
+
+    depends_on:
+      consumer:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+
+    restart: unless-stopped
+
+
+  grafana:
+    profiles:
+      - monitoring
+
+    image: grafana/grafana:13.1.0
+    container_name: contract_dwh_grafana
+
+    environment:
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/contract-dwh-operations.json
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      DWH_GRAFANA_USER: "${GRAFANA_DB_USER:-grafana_reader}"
+      DWH_GRAFANA_PASSWORD: "${GRAFANA_DB_PASSWORD:-grafana}"
+
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    restart: unless-stopped
+
+
 volumes:
+  grafana_data:
   postgres_data:
   redpanda_data:
