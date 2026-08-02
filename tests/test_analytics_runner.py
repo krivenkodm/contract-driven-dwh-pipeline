@@ -2,10 +2,15 @@ import json
 
 from analytics_runner import (
     CommandOutcome,
+    TRIGGER_TYPES,
     freshness_status,
     overall_status,
     summarize_artifact,
 )
+
+
+def test_airflow_is_a_supported_trigger_type():
+    assert "airflow" in TRIGGER_TYPES
 
 
 def test_summarize_artifact_counts_dbt_node_statuses(tmp_path):

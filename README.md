@@ -6,7 +6,7 @@ The project uses **Redpanda** as a lightweight Kafka-compatible broker and
 Schema Registry for local development.
 
 ```text
-YAML Contract → Avro Schema Registry → Kafka Topic → RAW → dbt → DDS → Mart
+YAML Contract → Avro Schema Registry → Kafka Topic → RAW → Airflow → dbt → DDS → Mart
 ```
 
 ---
@@ -84,6 +84,11 @@ The pipeline uses this contract to:
 └──────────┬──────────┘
            v
 ┌─────────────────────┐
+│ Airflow DAG         │
+│ checks + scheduling │
+└──────────┬──────────┘
+           v
+┌─────────────────────┐
 │ dbt staging +       │
 │ intermediate models │
 └──────────┬──────────┘
@@ -115,6 +120,7 @@ The pipeline uses this contract to:
 * Docker Compose
 * pytest
 * dbt Core with the PostgreSQL adapter
+* Apache Airflow 3 with LocalExecutor
 * Grafana
 * GitHub Actions
 * Makefile
@@ -148,7 +154,9 @@ contract-driven-dwh-pipeline/
 │   ├── consumer.py
 │   ├── dwh_writer.py
 │   ├── analytics_runner.py
+│   ├── airflow_config_checker.py
 │   ├── monitoring_config_checker.py
+│   ├── pipeline_health_check.py
 │   └── topic_manager.py
 │
 ├── sql/
@@ -168,6 +176,9 @@ contract-driven-dwh-pipeline/
 │   ├── snapshots/
 │   └── tests/
 │
+├── airflow/dags/
+│   └── contract_dwh_analytics.py
+│
 ├── monitoring/grafana/
 │   ├── dashboards/
 │   ├── provisioning/
@@ -175,7 +186,8 @@ contract-driven-dwh-pipeline/
 │
 ├── scripts/
 │   ├── migrate.sh
-│   └── e2e_smoke.sh
+│   ├── e2e_smoke.sh
+│   └── airflow_e2e.sh
 │
 ├── tests/
 │   ├── integration/
@@ -185,6 +197,7 @@ contract-driven-dwh-pipeline/
 │   └── ci.yml
 │
 ├── docker-compose.yml
+├── Dockerfile.airflow
 ├── Dockerfile.analytics
 ├── Makefile
 ├── requirements.txt
@@ -517,8 +530,8 @@ The CI workflow validates contracts and generated Avro artifacts, parses the
 dbt project, runs Python unit tests, tests fresh and populated database
 migrations, exercises dbt incrementality and parity, starts the full
 Redpanda/PostgreSQL stack, and executes both JSON and Avro RAW → DDS → MART
-smoke tests. Docker status and logs are uploaded as an artifact when a job
-fails.
+smoke tests plus an Airflow-triggered dbt run. Docker status and logs are
+uploaded as an artifact when a job fails.
 
 Inspect the result:
 
@@ -540,7 +553,7 @@ make down
 
 ---
 
-## 12. Orchestration and Observability
+## 12. Lightweight Orchestration and Observability
 
 `make build-analytics` runs the observed analytics wrapper. It checks RAW
 freshness, runs `dbt build`, reads dbt artifacts, and writes one audit row to
@@ -589,7 +602,75 @@ when freshness warns/fails or the dbt build fails.
 
 ---
 
-## 13. Operational Monitoring Dashboard
+## 13. Apache Airflow Orchestration
+
+Airflow 3 is the primary production-style orchestrator. Its
+`contract_dwh_analytics` DAG runs three ordered tasks:
+
+~~~text
+check_schema_registry → run_analytics → check_pipeline_health
+~~~
+
+The middle task reuses `analytics_runner.py`, so manual, fallback-scheduled,
+and Airflow runs share the same dbt commands, PostgreSQL advisory lock,
+artifact parsing, webhook behavior, and `analytics_run_history` audit table.
+Airflow adds durable scheduling state, retries, task logs, run history, and a
+UI; it does not create a second analytics implementation.
+
+Start Airflow:
+
+~~~bash
+make airflow-up
+~~~
+
+This bootstraps the DWH, stops the lightweight `analytics-runner` if it is
+running, migrates a separate Airflow metadata database, starts the API server,
+scheduler, and standalone DAG processor, and verifies that the DAG was parsed.
+Open the local-only UI at:
+
+~~~text
+http://localhost:8080
+~~~
+
+Simple authentication is configured as all-admin for this localhost demo.
+It must be replaced by a real auth manager before exposing Airflow outside a
+developer machine.
+
+Useful commands:
+
+~~~bash
+make airflow-trigger    # start a manual DAG run
+make airflow-runs       # show the latest ten DAG runs
+make airflow-status     # show services and recent runs
+make airflow-health     # query the Airflow health endpoint
+make airflow-dag-check  # show import errors and confirm DAG discovery
+make airflow-logs
+make airflow-e2e        # fresh event → DAG → dbt audit record
+make airflow-down       # keep Kafka, DWH and consumer running
+~~~
+
+The default cron schedule is every five minutes. Override it explicitly:
+
+~~~bash
+make airflow-up AIRFLOW_ANALYTICS_SCHEDULE='*/10 * * * *'
+~~~
+
+The DAG disables historical catchup, allows only one active DAG run, and
+configures task retries and execution timeouts. The final health task fails on
+`critical` but permits `warning`, because DLQ and DQ warnings are operational
+signals rather than transformation failures. Use Grafana with Airflow instead
+of the lightweight scheduler via:
+
+~~~bash
+make monitoring-airflow-up
+~~~
+
+`make orchestration-up` remains available as a small fallback when an Airflow
+UI and metadata service are unnecessary.
+
+---
+
+## 14. Operational Monitoring Dashboard
 
 The repository contains a provisioned Grafana 13 dashboard backed by six dbt
 views in the dedicated `dbt_monitoring` schema. The views are the governed
@@ -603,7 +684,9 @@ make monitoring-up
 ```
 
 This command bootstraps the pipeline, runs one observed dbt build, configures a
-read-only PostgreSQL role, and starts the scheduler plus Grafana. Open:
+read-only PostgreSQL role, and starts the lightweight fallback scheduler plus
+Grafana. Use `make monitoring-airflow-up` to start Grafana with Airflow as the
+only scheduler. Open:
 
 ```text
 http://localhost:3000/d/contract-dwh-operations
@@ -654,7 +737,7 @@ make validate-monitoring-config
 
 ---
 
-## 14. Example Mart
+## 15. Example Mart
 
 ```sql
 CREATE TABLE mart_daily_order_revenue AS
@@ -671,7 +754,7 @@ GROUP BY
 
 ---
 
-## 15. Compatibility Rules
+## 16. Compatibility Rules
 
 Allowed changes:
 
@@ -720,7 +803,7 @@ default, so Registry accepts the v1 → v2 transition as backward compatible.
 
 ---
 
-## 16. Data Quality Checks
+## 17. Data Quality Checks
 
 The current pipeline validates required fields, types, enums and timestamp
 timezones before RAW insertion. DDS also exposes business data quality flags:
@@ -761,7 +844,7 @@ Further useful checks:
 
 ---
 
-## 17. What This Project Demonstrates
+## 18. What This Project Demonstrates
 
 This project demonstrates practical knowledge of:
 
@@ -785,6 +868,7 @@ This project demonstrates practical knowledge of:
 * dbt data tests, unit tests and snapshots
 * source freshness SLAs and dbt artifact parsing
 * scheduled, concurrency-safe analytics execution
+* Airflow DAG scheduling, retries, task logs, and health-gated orchestration
 * persistent run history and webhook alerting
 * governed operational dbt models and health classification
 * provisioned Grafana dashboards, read-only access, and alert rules
@@ -794,23 +878,24 @@ This project demonstrates practical knowledge of:
 
 ---
 
-## 18. Resume Description
+## 19. Resume Description
 
 Built a contract-driven DWH ingestion pipeline using Python, PostgreSQL,
 Kafka-compatible streaming with Redpanda, Schema Registry, Avro, and dbt.
 Implemented automatic RAW DDL and Avro schema generation, governed backward
 compatibility, dual JSON/Avro ingestion, dead-letter handling, idempotent
 loading, incremental DDS and marts, historical snapshots, parity checks,
-database integration tests, source freshness monitoring, scheduled dbt
-execution, persistent run observability, governed operational metrics, a
+database integration tests, source freshness monitoring, Airflow-orchestrated
+dbt execution, persistent run observability, governed operational metrics, a
 provisioned Grafana dashboard with alerting, and end-to-end CI.
 
 ---
 
-## 19. Future Improvements
+## 20. Future Improvements
 
-* integrate a production orchestrator such as Airflow or Dagster
 * add historical DDS loading
+* add remote object storage for Airflow task logs
+* deploy Airflow with a production auth manager and secrets backend
 * replace the demo event heartbeat with a dedicated ingestion heartbeat
 * move Grafana authentication and alert delivery to managed infrastructure
 * retain Kafka headers and producer/schema identifiers

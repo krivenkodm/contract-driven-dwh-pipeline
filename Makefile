@@ -27,6 +27,9 @@ GRAFANA_ADMIN_USER ?= admin
 GRAFANA_ADMIN_PASSWORD ?= admin
 GRAFANA_DB_USER ?= grafana_reader
 GRAFANA_DB_PASSWORD ?= grafana
+AIRFLOW_PORT ?= 8080
+AIRFLOW_DAG_ID ?= contract_dwh_analytics
+AIRFLOW_ANALYTICS_SCHEDULE ?= */5 * * * *
 
 
 .PHONY: \
@@ -69,14 +72,25 @@ GRAFANA_DB_PASSWORD ?= grafana
 	verify-dbt-parity \
 	dbt-docs \
 	validate-monitoring-config \
+	validate-airflow-config \
 	analytics-run \
 	analytics-run-strict \
 	analytics-history \
 	orchestration-up \
 	orchestration-down \
 	orchestration-logs \
+	airflow-up \
+	airflow-down \
+	airflow-logs \
+	airflow-status \
+	airflow-health \
+	airflow-dag-check \
+	airflow-trigger \
+	airflow-runs \
+	airflow-e2e \
 	init-monitoring-reader \
 	monitoring-up \
+	monitoring-airflow-up \
 	monitoring-down \
 	monitoring-logs \
 	monitoring-status \
@@ -375,6 +389,10 @@ validate-monitoring-config:
 	$(PYTHON) src/monitoring_config_checker.py
 
 
+validate-airflow-config:
+	$(PYTHON) src/airflow_config_checker.py
+
+
 analytics-run: migrate
 	POSTGRES_DSN=$(ANALYTICS_POSTGRES_DSN) \
 	DBT_DATABASE=$(POSTGRES_DB) \
@@ -430,6 +448,102 @@ orchestration-logs:
 		logs -f analytics-runner
 
 
+airflow-up: bootstrap validate-airflow-config
+	@docker compose \
+		--profile orchestration \
+		stop analytics-runner >/dev/null 2>&1 || true
+	@AIRFLOW_PORT=$(AIRFLOW_PORT) \
+	AIRFLOW_ANALYTICS_SCHEDULE="$(AIRFLOW_ANALYTICS_SCHEDULE)" \
+	ALERT_WEBHOOK_URL=$(ALERT_WEBHOOK_URL) \
+	docker compose --profile airflow build airflow-init
+	@AIRFLOW_PORT=$(AIRFLOW_PORT) \
+	AIRFLOW_ANALYTICS_SCHEDULE="$(AIRFLOW_ANALYTICS_SCHEDULE)" \
+	ALERT_WEBHOOK_URL=$(ALERT_WEBHOOK_URL) \
+	docker compose --profile airflow up -d \
+		airflow-api-server \
+		airflow-scheduler \
+		airflow-dag-processor
+	@set -e; \
+	attempt=1; \
+	while ! curl --fail --silent --show-error \
+		http://localhost:$(AIRFLOW_PORT)/api/v2/monitor/health \
+		>/dev/null 2>&1; do \
+		if [ "$$attempt" -ge 60 ]; then \
+			echo "Airflow API server did not become ready"; \
+			docker compose --profile airflow logs --tail=100 airflow-api-server; \
+			exit 1; \
+		fi; \
+		sleep 2; \
+		attempt=$$((attempt + 1)); \
+	done
+	@set -e; \
+	attempt=1; \
+	while ! docker compose exec -T airflow-scheduler \
+		airflow dags list 2>/dev/null \
+		| grep -q "$(AIRFLOW_DAG_ID)"; do \
+		if [ "$$attempt" -ge 60 ]; then \
+			echo "Airflow DAG was not discovered"; \
+			docker compose --profile airflow logs --tail=100 airflow-dag-processor; \
+			exit 1; \
+		fi; \
+		sleep 2; \
+		attempt=$$((attempt + 1)); \
+	done
+	$(MAKE) airflow-dag-check
+	@echo "Airflow UI: http://localhost:$(AIRFLOW_PORT)"
+
+
+airflow-down:
+	docker compose --profile airflow stop \
+		airflow-dag-processor \
+		airflow-scheduler \
+		airflow-api-server \
+		airflow-postgres
+
+
+airflow-logs:
+	docker compose --profile airflow logs -f \
+		airflow-api-server \
+		airflow-scheduler \
+		airflow-dag-processor
+
+
+airflow-status:
+	docker compose --profile airflow ps
+	$(MAKE) airflow-runs
+
+
+airflow-health:
+	@curl --fail --silent --show-error \
+		http://localhost:$(AIRFLOW_PORT)/api/v2/monitor/health
+	@echo
+
+
+airflow-dag-check:
+	docker compose exec -T airflow-scheduler \
+		airflow dags list-import-errors
+	@docker compose exec -T airflow-scheduler \
+		airflow dags list \
+		| grep "$(AIRFLOW_DAG_ID)"
+
+
+airflow-trigger:
+	docker compose exec -T airflow-scheduler \
+		airflow dags trigger $(AIRFLOW_DAG_ID)
+
+
+airflow-runs:
+	docker compose exec -T airflow-scheduler \
+		airflow dags list-runs $(AIRFLOW_DAG_ID) \
+		--limit 10
+
+
+airflow-e2e: airflow-up
+	AIRFLOW_DAG_ID=$(AIRFLOW_DAG_ID) \
+	AIRFLOW_PORT=$(AIRFLOW_PORT) \
+	./scripts/airflow_e2e.sh
+
+
 init-monitoring-reader:
 	@docker exec \
 		-e GRAFANA_READER_USER="$(GRAFANA_DB_USER)" \
@@ -458,6 +572,21 @@ monitoring-up:
 		--profile orchestration \
 		--profile monitoring \
 		up -d --build analytics-runner grafana
+	@echo "Grafana dashboard: http://localhost:$(GRAFANA_PORT)/d/contract-dwh-operations"
+
+
+monitoring-airflow-up:
+	$(MAKE) airflow-up
+	$(MAKE) init-monitoring-reader
+	@GRAFANA_PORT=$(GRAFANA_PORT) \
+	GRAFANA_ADMIN_USER=$(GRAFANA_ADMIN_USER) \
+	GRAFANA_ADMIN_PASSWORD=$(GRAFANA_ADMIN_PASSWORD) \
+	GRAFANA_DB_USER=$(GRAFANA_DB_USER) \
+	GRAFANA_DB_PASSWORD=$(GRAFANA_DB_PASSWORD) \
+	docker compose \
+		--profile monitoring \
+		up -d --build grafana
+	@echo "Airflow UI: http://localhost:$(AIRFLOW_PORT)"
 	@echo "Grafana dashboard: http://localhost:$(GRAFANA_PORT)/d/contract-dwh-operations"
 
 
@@ -565,11 +694,13 @@ ci:
 	$(MAKE) check-contracts
 	$(MAKE) check-avro-schemas
 	$(MAKE) validate-monitoring-config
+	$(MAKE) validate-airflow-config
 	$(MAKE) test-unit
 	$(MAKE) test-integration
 	$(MAKE) bootstrap
 	$(MAKE) e2e
 	$(MAKE) e2e-avro
+	$(MAKE) airflow-e2e
 
 
 ci-logs:
