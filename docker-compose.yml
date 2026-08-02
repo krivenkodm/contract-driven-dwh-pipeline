@@ -1,3 +1,44 @@
+x-airflow-common: &airflow-common
+  profiles:
+    - airflow
+
+  build:
+    context: .
+    dockerfile: Dockerfile.airflow
+
+  image: contract-dwh-airflow:3.3.0
+
+  environment: &airflow-common-environment
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__PARALLELISM: "2"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+    AIRFLOW__API_AUTH__JWT_SECRET: contract-dwh-local-jwt-secret-change-me-0123456789-contract-dwh-local-9876543210
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    AIRFLOW__DAG_PROCESSOR__MIN_FILE_PROCESS_INTERVAL: "5"
+    AIRFLOW_ANALYTICS_SCHEDULE: "${AIRFLOW_ANALYTICS_SCHEDULE:-*/5 * * * *}"
+    CONTRACT_DWH_APP_DIR: /opt/contract-dwh
+    CONTRACTS_DIR: /opt/contract-dwh/contracts
+    SCHEMA_REGISTRY_URL: http://redpanda:8081
+    POSTGRES_DSN: postgresql://dwh:dwh@postgres:5432/dwh
+    DBT_PROJECT_DIR: /opt/contract-dwh/dbt
+    DBT_PROFILES_DIR: /opt/contract-dwh/dbt
+    DBT_HOST: postgres
+    DBT_PORT: "5432"
+    DBT_USER: dwh
+    DBT_PASSWORD: dwh
+    DBT_DATABASE: dwh
+    DBT_SCHEMA: dbt
+    ALERT_WEBHOOK_URL: "${ALERT_WEBHOOK_URL:-}"
+
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags:ro
+    - airflow_logs:/opt/airflow/logs
+
+
 services:
   redpanda:
     image: docker.redpanda.com/redpandadata/redpanda:v26.1.12
@@ -169,6 +210,117 @@ services:
     restart: unless-stopped
 
 
+  airflow-postgres:
+    profiles:
+      - airflow
+
+    image: postgres:16
+    container_name: contract_dwh_airflow_postgres
+
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U airflow -d airflow
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+    volumes:
+      - airflow_postgres_data:/var/lib/postgresql/data
+
+    restart: unless-stopped
+
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: contract_dwh_airflow_init
+
+    command:
+      - bash
+      - -c
+      - airflow db migrate
+
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+
+    restart: "no"
+
+
+  airflow-api-server:
+    <<: *airflow-common
+    container_name: contract_dwh_airflow_api_server
+
+    command:
+      - api-server
+
+    ports:
+      - "127.0.0.1:${AIRFLOW_PORT:-8080}:8080"
+
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - http://localhost:8080/api/v2/monitor/health
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+    restart: unless-stopped
+
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: contract_dwh_airflow_scheduler
+
+    command:
+      - scheduler
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+    depends_on:
+      airflow-api-server:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      schema-init:
+        condition: service_completed_successfully
+
+    restart: unless-stopped
+
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    container_name: contract_dwh_airflow_dag_processor
+
+    command:
+      - dag-processor
+
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+    restart: unless-stopped
+
+
   grafana:
     profiles:
       - monitoring
@@ -206,6 +358,8 @@ services:
 
 
 volumes:
+  airflow_logs:
+  airflow_postgres_data:
   grafana_data:
   postgres_data:
   redpanda_data:

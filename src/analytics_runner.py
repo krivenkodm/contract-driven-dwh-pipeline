@@ -18,6 +18,7 @@ from psycopg.types.json import Jsonb
 
 
 ANALYTICS_LOCK_ID = 2_026_080_100
+TRIGGER_TYPES = ("manual", "scheduled", "ci", "airflow")
 
 SUCCESS_STATUSES = {"pass", "success"}
 WARNING_STATUSES = {"warn", "warning"}
@@ -438,7 +439,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profiles-dir", default="dbt")
     parser.add_argument(
         "--trigger",
-        choices=("manual", "scheduled", "ci"),
+        choices=TRIGGER_TYPES,
         default=os.getenv("ANALYTICS_TRIGGER", "manual"),
     )
     parser.add_argument(
